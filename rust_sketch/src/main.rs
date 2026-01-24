@@ -1,22 +1,66 @@
 //! Prolog-based LLM Intent Router in Rust
 //!
-//! This demonstrates the DRY principle: one set of structs for both
-//! JSON serialization (serde) AND Prolog term conversion (swipl).
+//! This is a port of the Python router, demonstrating the DRY principle:
+//! one set of structs for both JSON serialization (serde) AND Prolog term conversion.
 
 use anyhow::Result;
+use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-
-// Note: In a real implementation, you'd uncomment this:
-// use swipl::prelude::*;
 
 mod derive_sketch;
 
 // ============================================================================
-// APPROACH 1: Dual Derive (Ideal but requires swipl to support it well)
+// CLI Arguments
 // ============================================================================
-//
-// The dream: derive BOTH serde and Prolog traits on the same struct.
-// This works if swipl's Unifiable maps cleanly to your Prolog representation.
+
+#[derive(Parser, Debug)]
+#[command(name = "prolog-router")]
+#[command(about = "Route user intents to tools via Prolog rules")]
+struct Args {
+    /// User request in natural language
+    user_text: String,
+
+    /// Optional date (e.g., today, tomorrow, 2026-02-10)
+    #[arg(long)]
+    date: Option<String>,
+
+    /// Optional location for weather
+    #[arg(long)]
+    location: Option<String>,
+
+    /// Optional recipient for draft email
+    #[arg(long)]
+    recipient: Option<String>,
+
+    /// Optional source preference
+    #[arg(long, value_enum)]
+    source: Option<SourcePreferenceArg>,
+
+    /// Use the LLM intent extractor (not implemented in Rust yet)
+    #[arg(long = "use-llm")]
+    use_llm: bool,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum SourcePreferenceArg {
+    Notes,
+    Files,
+    Either,
+}
+
+impl From<SourcePreferenceArg> for SourcePreference {
+    fn from(arg: SourcePreferenceArg) -> Self {
+        match arg {
+            SourcePreferenceArg::Notes => SourcePreference::Notes,
+            SourcePreferenceArg::Files => SourcePreference::Files,
+            SourcePreferenceArg::Either => SourcePreference::Either,
+        }
+    }
+}
+
+// ============================================================================
+// Domain Models (shared between serde JSON and Prolog)
+// ============================================================================
 
 /// Intent types supported by the router
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,10 +99,6 @@ pub enum SourcePreference {
 }
 
 /// Extracted entities from user input
-///
-/// This struct is used for:
-/// 1. Parsing JSON from LLM structured output (serde)
-/// 2. Passing to Prolog as a dict term (manual or derive)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Entities {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,13 +156,10 @@ pub struct IntentPayload {
 }
 
 // ============================================================================
-// APPROACH 2: Trait-based conversion (more explicit, always works)
+// Prolog Dict Conversion (DRY approach via JSON intermediate)
 // ============================================================================
-//
-// Define a trait that converts our structs to Prolog dict syntax.
-// This is similar to what we do in Python but type-safe.
 
-/// Trait for converting Rust types to SWI-Prolog dict term strings
+/// Trait for converting Rust types to SWI-Prolog dict syntax
 pub trait ToPrologDict {
     fn to_prolog_dict(&self) -> String;
 }
@@ -175,129 +212,377 @@ fn escape_prolog_string(s: &str) -> String {
 }
 
 // ============================================================================
-// APPROACH 3: Use serde_json::Value as intermediate (most flexible)
+// Stub Intent Extractor (heuristic-based, like Python version)
 // ============================================================================
-//
-// Both serde and Prolog can work with a generic JSON-like Value type.
-// This avoids needing special derives - just convert through JSON.
 
-pub trait ToPrologDictViaJson: Serialize {
-    fn to_prolog_dict_via_json(&self) -> Result<String> {
-        let value = serde_json::to_value(self)?;
-        Ok(json_value_to_prolog_dict(&value))
+/// Simple heuristic intent extractor for testing routing
+fn extract_intent_stub(user_text: &str) -> IntentPayload {
+    let t = user_text.to_lowercase();
+
+    // Detect source preference
+    let source_pref = if t.contains("notes") {
+        SourcePreference::Notes
+    } else if t.contains("files") {
+        SourcePreference::Files
+    } else {
+        SourcePreference::Either
+    };
+
+    // Naive intent detection
+    let intent = if t.starts_with("summarize") || t.contains("summarize") {
+        IntentType::Summarize
+    } else if t.starts_with("find") || t.starts_with("search") || t.contains("look for") {
+        IntentType::Find
+    } else if t.contains("weather") {
+        IntentType::Weather
+    } else if t.contains("email") || t.starts_with("draft") {
+        IntentType::Draft
+    } else if t.contains("remind") || t.contains("todo") {
+        IntentType::Remind
+    } else {
+        IntentType::Unknown
+    };
+
+    // Naive topic extraction: everything after "about"
+    let topic = if let Some(idx) = t.find("about") {
+        let after_about = &user_text[idx + 5..];
+        Some(after_about.trim().to_string())
+    } else {
+        // Or after the first word for summarize/find
+        let pieces: Vec<&str> = user_text.splitn(2, ' ').collect();
+        if pieces.len() == 2 && matches!(intent, IntentType::Summarize | IntentType::Find) {
+            Some(pieces[1].trim().to_string())
+        } else {
+            None
+        }
+    };
+
+    // Weather date extraction (toy)
+    let date = if intent == IntentType::Weather {
+        if t.contains("tomorrow") {
+            Some("tomorrow".to_string())
+        } else if t.contains("today") {
+            Some("today".to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    IntentPayload {
+        intent,
+        entities: Entities {
+            topic,
+            date,
+            ..Default::default()
+        },
+        constraints: Constraints {
+            source_preference: source_pref,
+            ..Default::default()
+        },
     }
 }
 
-// Blanket implementation for anything that implements Serialize
-impl<T: Serialize> ToPrologDictViaJson for T {}
-
-fn json_value_to_prolog_dict(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("\"{}\"", escape_prolog_string(s)),
-        serde_json::Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_value_to_prolog_dict).collect();
-            format!("[{}]", items.join(", "))
-        }
-        serde_json::Value::Object(map) => {
-            let pairs: Vec<String> = map
-                .iter()
-                .filter(|(_, v)| !v.is_null()) // Skip null values like Python version
-                .map(|(k, v)| format!("{}:{}", k, json_value_to_prolog_dict(v)))
-                .collect();
-            format!("_{{{}}}", pairs.join(", "))
-        }
-    }
-}
-
 // ============================================================================
-// Router implementation using swipl
+// Stub Prolog Router (simulates what router.pl would return)
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Decision {
-    Route { tool: String, args: serde_json::Value },
-    NeedInfo { question: String },
-    Reject { reason: String },
+    Route {
+        tool: String,
+        args: serde_json::Value,
+    },
+    NeedInfo {
+        question: String,
+    },
+    Reject {
+        reason: String,
+    },
 }
 
-/// Query the Prolog router
-pub fn prolog_decide(payload: &IntentPayload) -> Result<Decision> {
-    // In a real implementation, you'd initialize the Prolog engine once
-    // and reuse it. This is simplified for illustration.
+/// Stub Prolog router - simulates router.pl decisions
+fn prolog_decide(payload: &IntentPayload) -> Decision {
+    let intent = &payload.intent;
+    let entities = &payload.entities;
+    let constraints = &payload.constraints;
 
-    let intent_atom = payload.intent.as_atom();
-    let entities_dict = payload.entities.to_prolog_dict();
-    let constraints_dict = payload.constraints.to_prolog_dict();
-
-    // Build the query string
+    // Print the query that would be sent to Prolog
     let query = format!(
         "route({}, {}, {}, Tool, Args)",
-        intent_atom, entities_dict, constraints_dict
+        intent.as_atom(),
+        entities.to_prolog_dict(),
+        constraints.to_prolog_dict()
     );
+    eprintln!("DEBUG: Prolog query: {}", query);
 
-    println!("Prolog query: {}", query);
+    // Simulate routing logic from router.pl
+    match intent {
+        IntentType::Summarize | IntentType::Find => {
+            let query_text = entities
+                .topic
+                .clone()
+                .or_else(|| entities.query.clone())
+                .unwrap_or_default();
 
-    // Here you would actually call swipl:
-    //
-    // let engine = Engine::new();
-    // engine.call("consult('router.pl')")?;
-    // let results = engine.query(&query)?;
-    //
-    // For now, return a stub:
-    Ok(Decision::Route {
-        tool: "stub_tool".to_string(),
-        args: serde_json::json!({"query": "stub"}),
-    })
+            if query_text.is_empty() {
+                return Decision::NeedInfo {
+                    question: format!("What should I {}?", intent.as_atom()),
+                };
+            }
+
+            let tool = match constraints.source_preference {
+                SourcePreference::Notes => "search_notes",
+                _ => "search_files",
+            };
+
+            Decision::Route {
+                tool: tool.to_string(),
+                args: serde_json::json!({
+                    "query": query_text,
+                    "scope": "user"
+                }),
+            }
+        }
+
+        IntentType::Weather => {
+            let location = match &entities.location {
+                Some(loc) => loc.clone(),
+                None => {
+                    return Decision::NeedInfo {
+                        question: "What location should I use?".to_string(),
+                    }
+                }
+            };
+
+            let date = match &entities.date {
+                Some(d) => d.clone(),
+                None => {
+                    return Decision::NeedInfo {
+                        question: "What date should I use? (e.g., today, tomorrow)".to_string(),
+                    }
+                }
+            };
+
+            Decision::Route {
+                tool: "get_weather".to_string(),
+                args: serde_json::json!({
+                    "location": location,
+                    "date": date
+                }),
+            }
+        }
+
+        IntentType::Draft => {
+            let recipient = match &entities.recipient {
+                Some(r) => r.clone(),
+                None => {
+                    return Decision::NeedInfo {
+                        question: "Who should I email?".to_string(),
+                    }
+                }
+            };
+
+            let subject = entities.topic.clone().unwrap_or_else(|| "(no subject)".to_string());
+
+            Decision::Route {
+                tool: "draft_email".to_string(),
+                args: serde_json::json!({
+                    "to": recipient,
+                    "subject": subject,
+                    "body": ""
+                }),
+            }
+        }
+
+        IntentType::Remind => {
+            let title = match &entities.topic {
+                Some(t) => t.clone(),
+                None => {
+                    return Decision::NeedInfo {
+                        question: "What should I remind you about?".to_string(),
+                    }
+                }
+            };
+
+            let due = match &entities.date {
+                Some(d) => d.clone(),
+                None => {
+                    return Decision::NeedInfo {
+                        question: "When is this due? (e.g., tomorrow, next Friday, 2026-02-01)"
+                            .to_string(),
+                    }
+                }
+            };
+
+            let priority = entities
+                .priority
+                .clone()
+                .unwrap_or_else(|| "normal".to_string());
+
+            Decision::Route {
+                tool: "create_todo".to_string(),
+                args: serde_json::json!({
+                    "title": title,
+                    "due": due,
+                    "priority": priority
+                }),
+            }
+        }
+
+        IntentType::Unknown => Decision::Reject {
+            reason: "No matching route or follow-up found.".to_string(),
+        },
+    }
 }
 
 // ============================================================================
-// Main - demonstrating the DRY principle
+// Stub Tool Runner
+// ============================================================================
+
+fn run_tool(tool: &str, args: &serde_json::Value) -> String {
+    match tool {
+        "search_notes" => format!("[stub] searched notes for: {}", args),
+        "search_files" => format!("[stub] searched files for: {}", args),
+        "get_weather" => format!("[stub] weather result for: {}", args),
+        "draft_email" => format!("[stub] drafted email with: {}", args),
+        "create_todo" => format!("[stub] created todo with: {}", args),
+        _ => format!("[stub] unknown tool: {} args={}", tool, args),
+    }
+}
+
+// ============================================================================
+// Main
 // ============================================================================
 
 fn main() -> Result<()> {
-    // Example 1: Parse JSON from LLM (serde)
-    let json_input = r#"{
-        "intent": "summarize",
-        "entities": {
-            "topic": "machine learning",
-            "date": null
-        },
-        "constraints": {
-            "source_preference": "notes"
-        }
-    }"#;
+    let args = Args::parse();
 
-    let payload: IntentPayload = serde_json::from_str(json_input)?;
-    println!("Parsed from JSON:");
-    println!("  Intent: {:?}", payload.intent);
-    println!("  Topic: {:?}", payload.entities.topic);
-    println!();
+    // Extract intent (stub or LLM)
+    let mut payload = if args.use_llm {
+        eprintln!("WARNING: --use-llm not implemented in Rust yet, using stub extractor");
+        extract_intent_stub(&args.user_text)
+    } else {
+        extract_intent_stub(&args.user_text)
+    };
 
-    // Example 2: Convert SAME struct to Prolog dict (manual trait)
-    println!("Prolog dict (manual trait):");
-    println!("  Entities: {}", payload.entities.to_prolog_dict());
-    println!("  Constraints: {}", payload.constraints.to_prolog_dict());
-    println!();
+    // Overlay CLI-provided entity slots
+    if let Some(date) = args.date {
+        payload.entities.date = Some(date);
+    }
+    if let Some(location) = args.location {
+        payload.entities.location = Some(location);
+    }
+    if let Some(recipient) = args.recipient {
+        payload.entities.recipient = Some(recipient);
+    }
+    if let Some(source) = args.source {
+        payload.constraints.source_preference = source.into();
+    }
 
-    // Example 3: Convert via JSON intermediate (most flexible)
-    println!("Prolog dict (via JSON):");
-    println!("  Entities: {}", payload.entities.to_prolog_dict_via_json()?);
-    println!("  Full payload: {}", payload.to_prolog_dict_via_json()?);
-    println!();
+    // Handle unknown intent
+    if payload.intent == IntentType::Unknown {
+        let response = serde_json::json!({
+            "type": "need_info",
+            "question": "What are you trying to do (summarize, find, weather, draft, remind)?"
+        });
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
 
-    // Example 4: Query Prolog
-    let decision = prolog_decide(&payload)?;
-    println!("Decision: {:?}", decision);
+    // Route via (stub) Prolog
+    let decision = prolog_decide(&payload);
+
+    // Print results
+    println!("Intent JSON:");
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    println!("\nProlog Decision:");
+    println!("{}", serde_json::to_string_pretty(&decision)?);
+
+    // Run tool if routed
+    if let Decision::Route { ref tool, ref args } = decision {
+        let result = run_tool(tool, args);
+        println!("\nTool Result:");
+        println!("{}", result);
+    }
 
     Ok(())
 }
 
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_stub_extractor_summarize() {
+        let payload = extract_intent_stub("summarize my notes about AI");
+        assert_eq!(payload.intent, IntentType::Summarize);
+        assert_eq!(payload.entities.topic, Some("AI".to_string()));
+        assert_eq!(payload.constraints.source_preference, SourcePreference::Notes);
+    }
+
+    #[test]
+    fn test_stub_extractor_weather() {
+        let payload = extract_intent_stub("what's the weather tomorrow");
+        assert_eq!(payload.intent, IntentType::Weather);
+        assert_eq!(payload.entities.date, Some("tomorrow".to_string()));
+    }
+
+    #[test]
+    fn test_stub_extractor_unknown() {
+        let payload = extract_intent_stub("hello world");
+        assert_eq!(payload.intent, IntentType::Unknown);
+    }
+
+    #[test]
+    fn test_prolog_decide_summarize() {
+        let payload = IntentPayload {
+            intent: IntentType::Summarize,
+            entities: Entities {
+                topic: Some("machine learning".to_string()),
+                ..Default::default()
+            },
+            constraints: Constraints {
+                source_preference: SourcePreference::Notes,
+                ..Default::default()
+            },
+        };
+
+        let decision = prolog_decide(&payload);
+        match decision {
+            Decision::Route { tool, args } => {
+                assert_eq!(tool, "search_notes");
+                assert_eq!(args["query"], "machine learning");
+            }
+            _ => panic!("Expected Route decision"),
+        }
+    }
+
+    #[test]
+    fn test_prolog_decide_weather_missing_location() {
+        let payload = IntentPayload {
+            intent: IntentType::Weather,
+            entities: Entities {
+                date: Some("tomorrow".to_string()),
+                ..Default::default()
+            },
+            constraints: Constraints::default(),
+        };
+
+        let decision = prolog_decide(&payload);
+        match decision {
+            Decision::NeedInfo { question } => {
+                assert!(question.contains("location"));
+            }
+            _ => panic!("Expected NeedInfo decision"),
+        }
+    }
 
     #[test]
     fn test_roundtrip_json() {
@@ -311,10 +596,7 @@ mod tests {
             constraints: Constraints::default(),
         };
 
-        // Serialize to JSON
         let json = serde_json::to_string(&payload).unwrap();
-
-        // Deserialize back
         let recovered: IntentPayload = serde_json::from_str(&json).unwrap();
 
         assert_eq!(payload.intent, recovered.intent);
@@ -332,21 +614,5 @@ mod tests {
         let dict = entities.to_prolog_dict();
         assert!(dict.contains("topic:\"AI notes\""));
         assert!(!dict.contains("location")); // None fields should be skipped
-    }
-
-    #[test]
-    fn test_json_to_prolog_consistency() {
-        let entities = Entities {
-            topic: Some("test".to_string()),
-            query: Some("search term".to_string()),
-            ..Default::default()
-        };
-
-        let manual = entities.to_prolog_dict();
-        let via_json = entities.to_prolog_dict_via_json().unwrap();
-
-        // Both should produce valid Prolog dict syntax
-        assert!(manual.starts_with("_{"));
-        assert!(via_json.starts_with("_{"));
     }
 }
