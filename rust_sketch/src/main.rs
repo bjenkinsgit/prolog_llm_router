@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod derive_sketch;
+mod llm;
 mod prolog;
 
 // ============================================================================
@@ -38,7 +39,7 @@ struct Args {
     #[arg(long, value_enum)]
     source: Option<SourcePreferenceArg>,
 
-    /// Use the LLM intent extractor (not implemented in Rust yet)
+    /// Use the LLM intent extractor (calls http://alien.local:8000/v1)
     #[arg(long = "use-llm")]
     use_llm: bool,
 
@@ -472,8 +473,14 @@ fn main() -> Result<()> {
 
     // Extract intent (stub or LLM)
     let mut payload = if args.use_llm {
-        eprintln!("WARNING: --use-llm not implemented in Rust yet, using stub extractor");
-        extract_intent_stub(&args.user_text)
+        eprintln!("DEBUG: Using LLM intent extractor");
+        match llm::extract_intent_llm(&args.user_text) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("WARNING: LLM extraction failed ({}), using stub extractor", e);
+                extract_intent_stub(&args.user_text)
+            }
+        }
     } else {
         extract_intent_stub(&args.user_text)
     };

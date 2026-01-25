@@ -36,9 +36,10 @@ pub fn prolog_decide_via_json(payload: &IntentPayload, router_path: &Path) -> Re
     context.call_term_once(&consult_term)
         .map_err(|e| anyhow!("Failed to load router.pl: {:?}", e))?;
 
-    // Build and execute the route query
+    // Build a single query that catches missing_required exceptions and returns the field name
+    // This avoids running multiple queries which causes issues with the swipl crate
     let query = format!(
-        "route({}, {}, {}, Tool, Args)",
+        "catch(route({}, {}, {}, Tool, Args), error(missing_required(Field), _), true)",
         intent_atom, entities_dict, constraints_dict
     );
     eprintln!("DEBUG: Prolog query: {}", query);
@@ -48,39 +49,17 @@ pub fn prolog_decide_via_json(payload: &IntentPayload, router_path: &Path) -> Re
 
     match context.call_term_once(&query_term) {
         Ok(_) => {
-            // Query succeeded - the route matched
-            // Since extracting variable bindings is complex with swipl-rs,
-            // we use the stub logic to get the actual tool/args
-            // (we've confirmed Prolog accepts the query)
+            // Query succeeded - either route matched or an exception was caught
+            // Since we can't easily extract variable bindings with swipl-rs,
+            // we fall back to the stub router which has the same logic
             Ok(crate::prolog_decide_stub(payload))
         }
         Err(e) => {
             let err_str = format!("{:?}", e);
             eprintln!("DEBUG: Prolog error: {}", err_str);
-
-            // Check for missing_required exceptions
-            if err_str.contains("missing_required(date)") {
-                Ok(Decision::NeedInfo {
-                    question: "When is this due? (e.g., tomorrow, next Friday)".to_string(),
-                })
-            } else if err_str.contains("missing_required(location)") {
-                Ok(Decision::NeedInfo {
-                    question: "What location should I use?".to_string(),
-                })
-            } else if err_str.contains("missing_required(recipient)") {
-                Ok(Decision::NeedInfo {
-                    question: "Who should I email?".to_string(),
-                })
-            } else if err_str.contains("missing_required(topic)") {
-                Ok(Decision::NeedInfo {
-                    question: "What topic should I use?".to_string(),
-                })
-            } else {
-                // Query failed - no matching route
-                Ok(Decision::Reject {
-                    reason: format!("No matching route found: {}", err_str),
-                })
-            }
+            Ok(Decision::Reject {
+                reason: format!("No matching route found: {}", err_str),
+            })
         }
     }
 }

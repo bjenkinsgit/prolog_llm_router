@@ -90,6 +90,9 @@ cargo run -- "summarize my notes about AI"
 # Run with stub router (no SWI-Prolog needed)
 cargo run -- --stub "summarize my notes about AI"
 
+# Run with LLM intent extraction (requires LLM server at http://alien.local:8000)
+cargo run -- --use-llm --stub "what's the weather tomorrow in NYC"
+
 # Run tests
 cargo test
 ```
@@ -97,8 +100,10 @@ cargo test
 **Prerequisites:**
 - SWI-Prolog must be installed for the `swipl` crate to build
 - On macOS, set `SWI_HOME_DIR` to the swipl resources directory
+- For `--use-llm`, an OpenAI-compatible LLM server at `http://alien.local:8000/v1`
 
 **CLI Options:**
 - `--stub` - Use stub Prolog router instead of real SWI-Prolog
+- `--use-llm` - Use LLM for intent extraction instead of stub heuristics
 - `--router <path>` - Path to router.pl file (default: `../router.pl`)
 - `--date`, `--location`, `--recipient`, `--source` - Override extracted entities
