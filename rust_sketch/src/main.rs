@@ -8,6 +8,7 @@
 //! - `scryer-backend`: Uses Scryer Prolog (pure Rust, no external dependencies)
 
 use anyhow::Result;
+use chrono::{Datelike, Days, Local, NaiveDate, Weekday};
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -286,6 +287,74 @@ impl ToPrologList for Constraints {
 
 fn escape_prolog_atom(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+// ============================================================================
+// Date Resolution (converts relative dates to absolute YYYY-MM-DD)
+// ============================================================================
+
+/// Resolve relative date strings to absolute YYYY-MM-DD format
+pub fn resolve_relative_date(date_str: &str) -> String {
+    let today = Local::now().date_naive();
+    let lower = date_str.to_lowercase();
+    let trimmed = lower.trim();
+
+    match trimmed {
+        "today" => format_date(today),
+        "tomorrow" => format_date(today + Days::new(1)),
+        "yesterday" => format_date(today - Days::new(1)),
+        _ => {
+            // Try to parse "next <weekday>" patterns
+            if let Some(weekday_str) = trimmed.strip_prefix("next ") {
+                if let Some(target_weekday) = parse_weekday(weekday_str.trim()) {
+                    return format_date(next_weekday(today, target_weekday));
+                }
+            }
+
+            // Try to parse standalone weekday (means "this coming <weekday>")
+            if let Some(target_weekday) = parse_weekday(trimmed) {
+                return format_date(next_weekday(today, target_weekday));
+            }
+
+            // Already absolute or unrecognized - pass through
+            date_str.to_string()
+        }
+    }
+}
+
+/// Format a NaiveDate as YYYY-MM-DD
+fn format_date(date: NaiveDate) -> String {
+    date.format("%Y-%m-%d").to_string()
+}
+
+/// Parse weekday name to chrono::Weekday
+fn parse_weekday(s: &str) -> Option<Weekday> {
+    match s.to_lowercase().as_str() {
+        "monday" | "mon" => Some(Weekday::Mon),
+        "tuesday" | "tue" | "tues" => Some(Weekday::Tue),
+        "wednesday" | "wed" => Some(Weekday::Wed),
+        "thursday" | "thu" | "thurs" => Some(Weekday::Thu),
+        "friday" | "fri" => Some(Weekday::Fri),
+        "saturday" | "sat" => Some(Weekday::Sat),
+        "sunday" | "sun" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+/// Find the next occurrence of a weekday (1-7 days from today)
+fn next_weekday(from: NaiveDate, target: Weekday) -> NaiveDate {
+    let current = from.weekday();
+    let days_ahead = (target.num_days_from_monday() as i64
+        - current.num_days_from_monday() as i64
+        + 7) % 7;
+    // If it's the same day, go to next week
+    let days_ahead = if days_ahead == 0 { 7 } else { days_ahead as u64 };
+    from + Days::new(days_ahead)
+}
+
+/// Get today's date in YYYY-MM-DD format
+pub fn today_date() -> String {
+    format_date(Local::now().date_naive())
 }
 
 // ============================================================================
@@ -609,6 +678,15 @@ fn main() -> Result<()> {
         payload.constraints.source_preference = source.into();
     }
 
+    // Resolve relative dates to absolute YYYY-MM-DD
+    if let Some(ref date) = payload.entities.date {
+        let resolved = resolve_relative_date(date);
+        if resolved != *date {
+            eprintln!("DEBUG: Resolved date '{}' -> '{}'", date, resolved);
+        }
+        payload.entities.date = Some(resolved);
+    }
+
     // Handle unknown intent
     if payload.intent == IntentType::Unknown {
         let response = serde_json::json!({
@@ -818,5 +896,63 @@ mod tests {
         let list = constraints.to_prolog_list();
         assert!(list.contains("source_preference-notes"));
         assert!(list.contains("safety-'normal'"));
+    }
+
+    #[test]
+    fn test_resolve_date_today() {
+        let resolved = resolve_relative_date("today");
+        let expected = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn test_resolve_date_tomorrow() {
+        let resolved = resolve_relative_date("tomorrow");
+        let expected = (Local::now().date_naive() + Days::new(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn test_resolve_date_yesterday() {
+        let resolved = resolve_relative_date("yesterday");
+        let expected = (Local::now().date_naive() - Days::new(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn test_resolve_date_weekday() {
+        // "friday" should resolve to the next Friday
+        let resolved = resolve_relative_date("friday");
+        assert!(resolved.len() == 10); // YYYY-MM-DD format
+        assert!(resolved.starts_with("20")); // Year starts with 20xx
+    }
+
+    #[test]
+    fn test_resolve_date_next_weekday() {
+        let resolved = resolve_relative_date("next monday");
+        assert!(resolved.len() == 10);
+        // Parse it back and verify it's a Monday
+        let parsed = NaiveDate::parse_from_str(&resolved, "%Y-%m-%d").unwrap();
+        assert_eq!(parsed.weekday(), Weekday::Mon);
+    }
+
+    #[test]
+    fn test_resolve_date_passthrough() {
+        // Already absolute dates should pass through unchanged
+        assert_eq!(resolve_relative_date("2026-01-25"), "2026-01-25");
+        assert_eq!(resolve_relative_date("January 15"), "January 15");
+    }
+
+    #[test]
+    fn test_resolve_date_case_insensitive() {
+        let lower = resolve_relative_date("today");
+        let upper = resolve_relative_date("TODAY");
+        let mixed = resolve_relative_date("ToDay");
+        assert_eq!(lower, upper);
+        assert_eq!(lower, mixed);
     }
 }
