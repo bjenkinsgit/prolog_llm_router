@@ -347,11 +347,42 @@ fn extract_intent_stub(user_text: &str) -> IntentPayload {
         None
     };
 
+    // Recipient extraction for draft/email (look for "email to <name>" or "to <name>" after email keyword)
+    let recipient = if intent == IntentType::Draft {
+        // Try "email to X" pattern first
+        if let Some(idx) = t.find("email to ") {
+            let after_to = &user_text[idx + 9..];
+            let recipient_word = after_to.split_whitespace().next();
+            recipient_word.map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string())
+        // Try "mail to X" pattern
+        } else if let Some(idx) = t.find("mail to ") {
+            let after_to = &user_text[idx + 8..];
+            let recipient_word = after_to.split_whitespace().next();
+            recipient_word.map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string())
+        // Try finding "to X" after "email" keyword
+        } else if let Some(email_idx) = t.find("email") {
+            let after_email = &t[email_idx..];
+            if let Some(to_idx) = after_email.find(" to ") {
+                let global_idx = email_idx + to_idx + 4;
+                let after_to = &user_text[global_idx..];
+                let recipient_word = after_to.split_whitespace().next();
+                recipient_word.map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     IntentPayload {
         intent,
         entities: Entities {
             topic,
             date,
+            recipient,
             ..Default::default()
         },
         constraints: Constraints {
@@ -668,6 +699,21 @@ mod tests {
     fn test_stub_extractor_unknown() {
         let payload = extract_intent_stub("hello world");
         assert_eq!(payload.intent, IntentType::Unknown);
+    }
+
+    #[test]
+    fn test_stub_extractor_email_with_recipient() {
+        let payload = extract_intent_stub("send an email to Mary");
+        assert_eq!(payload.intent, IntentType::Draft);
+        assert_eq!(payload.entities.recipient, Some("Mary".to_string()));
+    }
+
+    #[test]
+    fn test_stub_extractor_email_to_pattern() {
+        let payload = extract_intent_stub("I want you to send an email to John about the project");
+        assert_eq!(payload.intent, IntentType::Draft);
+        assert_eq!(payload.entities.recipient, Some("John".to_string()));
+        assert_eq!(payload.entities.topic, Some("the project".to_string()));
     }
 
     #[test]
