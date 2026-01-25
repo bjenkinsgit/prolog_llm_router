@@ -3,6 +3,8 @@
 //! This shows what a custom derive macro COULD look like that generates
 //! both serde traits AND Prolog term conversion from a single struct.
 //!
+//! This is reference/example code, not used in production.
+//!
 //! Usage would be:
 //! ```
 //! #[derive(SerdeProlog)]
@@ -17,6 +19,9 @@
 //! 2. impl Deserialize for Entities { ... }
 //! 3. impl ToPrologTerm for Entities { ... }
 //! 4. impl FromPrologTerm for Entities { ... }
+
+// Allow dead code - this is a reference sketch, not production code
+#![allow(dead_code)]
 
 // ============================================================================
 // What the derive macro would generate (pseudocode)

@@ -4,7 +4,7 @@
 //! which is written in Rust and can be embedded without FFI complexity.
 
 use anyhow::{anyhow, Result};
-use scryer_prolog::{LeafAnswer, Machine, MachineBuilder, Term};
+use scryer_prolog::{LeafAnswer, MachineBuilder, Term};
 use std::path::Path;
 
 use crate::{Decision, IntentPayload, ToPrologList};
@@ -87,12 +87,6 @@ fn extract_decision_from_answer(answer: LeafAnswer, _payload: &IntentPayload) ->
         }
         LeafAnswer::Exception(term) => {
             handle_exception(term)
-        }
-        _ => {
-            // Handle any future variants due to #[non_exhaustive]
-            Ok(Decision::Reject {
-                reason: "Unknown answer type".to_string(),
-            })
         }
     }
 }
