@@ -82,8 +82,23 @@ See `src/derive_sketch.rs` for the trait definitions.
 
 ```bash
 cd rust_sketch
-cargo run
+
+# Run with real SWI-Prolog (requires SWI_HOME_DIR on macOS)
+export SWI_HOME_DIR=/Applications/SWI-Prolog.app/Contents/swipl
+cargo run -- "summarize my notes about AI"
+
+# Run with stub router (no SWI-Prolog needed)
+cargo run -- --stub "summarize my notes about AI"
+
+# Run tests
 cargo test
 ```
 
-Note: Requires SWI-Prolog installed for the `swipl` crate to build.
+**Prerequisites:**
+- SWI-Prolog must be installed for the `swipl` crate to build
+- On macOS, set `SWI_HOME_DIR` to the swipl resources directory
+
+**CLI Options:**
+- `--stub` - Use stub Prolog router instead of real SWI-Prolog
+- `--router <path>` - Path to router.pl file (default: `../router.pl`)
+- `--date`, `--location`, `--recipient`, `--source` - Override extracted entities

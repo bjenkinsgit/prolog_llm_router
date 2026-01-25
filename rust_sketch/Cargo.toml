@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Prolog bindings - commented out for sketch (requires SWI-Prolog installed)
-# swipl = "0.3"  # Provides #[derive(Unifiable)] for term conversion
+# Prolog bindings (requires SWI-Prolog installed)
+swipl = "0.3"
 
 # Serde for JSON serialization (LLM structured output)
 serde = { version = "1.0", features = ["derive"] }
@@ -16,3 +16,7 @@ clap = { version = "4.0", features = ["derive"] }
 
 # Error handling
 anyhow = "1.0"
+
+[features]
+default = ["prolog"]
+prolog = []  # Feature flag for actual Prolog integration

@@ -6,8 +6,10 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 mod derive_sketch;
+mod prolog;
 
 // ============================================================================
 // CLI Arguments
@@ -39,6 +41,14 @@ struct Args {
     /// Use the LLM intent extractor (not implemented in Rust yet)
     #[arg(long = "use-llm")]
     use_llm: bool,
+
+    /// Use stub Prolog router instead of real SWI-Prolog
+    #[arg(long = "stub")]
+    use_stub: bool,
+
+    /// Path to router.pl file
+    #[arg(long = "router", default_value = "../router.pl")]
+    router_path: PathBuf,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -304,7 +314,7 @@ pub enum Decision {
 }
 
 /// Stub Prolog router - simulates router.pl decisions
-fn prolog_decide(payload: &IntentPayload) -> Decision {
+pub fn prolog_decide_stub(payload: &IntentPayload) -> Decision {
     let intent = &payload.intent;
     let entities = &payload.entities;
     let constraints = &payload.constraints;
@@ -492,8 +502,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Route via (stub) Prolog
-    let decision = prolog_decide(&payload);
+    // Route via Prolog (stub or real)
+    let decision = if args.use_stub {
+        eprintln!("DEBUG: Using stub Prolog router");
+        prolog_decide_stub(&payload)
+    } else {
+        eprintln!("DEBUG: Using real SWI-Prolog with router: {}", args.router_path.display());
+        match prolog::prolog_decide_via_json(&payload, &args.router_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("WARNING: Prolog error ({}), falling back to stub", e);
+                prolog_decide_stub(&payload)
+            }
+        }
+    };
 
     // Print results
     println!("Intent JSON:");
@@ -554,7 +576,7 @@ mod tests {
             },
         };
 
-        let decision = prolog_decide(&payload);
+        let decision = prolog_decide_stub(&payload);
         match decision {
             Decision::Route { tool, args } => {
                 assert_eq!(tool, "search_notes");
@@ -575,7 +597,7 @@ mod tests {
             constraints: Constraints::default(),
         };
 
-        let decision = prolog_decide(&payload);
+        let decision = prolog_decide_stub(&payload);
         match decision {
             Decision::NeedInfo { question } => {
                 assert!(question.contains("location"));
