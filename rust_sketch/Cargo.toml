@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Prolog bindings (requires SWI-Prolog installed)
-swipl = "0.3"
+# SWI-Prolog bindings (requires SWI-Prolog installed)
+swipl = { version = "0.3", optional = true }
+
+# Scryer Prolog - pure Rust, no external dependencies
+scryer-prolog = { version = "0.10", optional = true }
 
 # Serde for JSON serialization (LLM structured output)
 serde = { version = "1.0", features = ["derive"] }
@@ -21,5 +24,6 @@ reqwest = { version = "0.11", features = ["blocking", "json"] }
 anyhow = "1.0"
 
 [features]
-default = ["prolog"]
-prolog = []  # Feature flag for actual Prolog integration
+default = ["swipl-backend"]
+swipl-backend = ["swipl"]      # Use SWI-Prolog (requires external install)
+scryer-backend = ["scryer-prolog"]  # Use Scryer Prolog (pure Rust)

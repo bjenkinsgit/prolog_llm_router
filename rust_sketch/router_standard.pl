@@ -6,7 +6,8 @@
 %
 % Data format:
 %   Entities and Constraints are association lists: [key-value, key2-value2, ...]
-%   Args are also association lists: [query-"AI", scope-user]
+%   Args are also association lists: [query-'AI', scope-user]
+%   Values use single quotes (atoms) instead of double quotes (char lists)
 
 % Tool capability facts (expand later)
 provides(search_notes, search(notes)).
@@ -18,7 +19,7 @@ provides(create_todo, create(todo)).
 % -----------------------------
 % Routing rules
 % route(Intent, Entities, Constraints, Tool, Args).
-% Entities and Constraints are assoc lists, e.g. [topic-"x", location-"y"].
+% Entities and Constraints are assoc lists, e.g. [topic-'x', location-'y'].
 % -----------------------------
 
 % Summarize / Find: prefer notes unless user prefers files explicitly
@@ -42,37 +43,37 @@ route(weather, E, _C, get_weather, [location-L, date-D]) :-
     must_get(E, date, D).
 
 % Draft requires recipient
-route(draft, E, _C, draft_email, [to-To, subject-S, body-""]) :-
+route(draft, E, _C, draft_email, [to-To, subject-S, body-'']) :-
     must_get(E, recipient, To),
-    get_with_default(E, topic, "(no subject)", S).
+    get_with_default(E, topic, '(no subject)', S).
 
 % Remind creates a todo
 route(remind, E, _C, create_todo, [title-T, due-D, priority-P]) :-
     must_get(E, topic, T),
     must_get(E, date, D),
-    get_with_default(E, priority, "normal", P).
+    get_with_default(E, priority, normal, P).
 
 % -----------------------------
 % Follow-up questions
 % need_info(Intent, Entities, Question).
 % -----------------------------
-need_info(weather, E, "What location should I use?") :-
+need_info(weather, E, 'What location should I use?') :-
     \+ get_key(E, location, _).
 
-need_info(weather, E, "What date should I use? (e.g., today, tomorrow)") :-
+need_info(weather, E, 'What date should I use? (e.g., today, tomorrow)') :-
     \+ get_key(E, date, _).
 
-need_info(remind, E, "When is this due?") :-
+need_info(remind, E, 'When is this due?') :-
     \+ get_key(E, date, _).
 
-need_info(draft, E, "Who should I email?") :-
+need_info(draft, E, 'Who should I email?') :-
     \+ get_key(E, recipient, _).
 
-need_info(summarize, E, "What topic should I summarize?") :-
+need_info(summarize, E, 'What topic should I summarize?') :-
     \+ get_key(E, topic, _),
     \+ get_key(E, query, _).
 
-need_info(find, E, "What should I search for?") :-
+need_info(find, E, 'What should I search for?') :-
     \+ get_key(E, topic, _),
     \+ get_key(E, query, _).
 

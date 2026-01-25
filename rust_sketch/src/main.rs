@@ -2,6 +2,10 @@
 //!
 //! This is a port of the Python router, demonstrating the DRY principle:
 //! one set of structs for both JSON serialization (serde) AND Prolog term conversion.
+//!
+//! Supports two Prolog backends (via feature flags):
+//! - `swipl-backend`: Uses SWI-Prolog via FFI (requires SWI-Prolog installed)
+//! - `scryer-backend`: Uses Scryer Prolog (pure Rust, no external dependencies)
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -10,7 +14,12 @@ use std::path::PathBuf;
 
 mod derive_sketch;
 mod llm;
+
+#[cfg(feature = "swipl-backend")]
 mod prolog;
+
+#[cfg(feature = "scryer-backend")]
+mod scryer;
 
 // ============================================================================
 // CLI Arguments
@@ -43,13 +52,13 @@ struct Args {
     #[arg(long = "use-llm")]
     use_llm: bool,
 
-    /// Use stub Prolog router instead of real SWI-Prolog
+    /// Use stub Prolog router instead of real Prolog
     #[arg(long = "stub")]
     use_stub: bool,
 
-    /// Path to router.pl file
-    #[arg(long = "router", default_value = "../router.pl")]
-    router_path: PathBuf,
+    /// Path to router.pl file (use router_standard.pl for Scryer backend)
+    #[arg(long = "router")]
+    router_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -220,6 +229,63 @@ impl ToPrologDict for Constraints {
 
 fn escape_prolog_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// ============================================================================
+// Prolog List Conversion (for Scryer and standard Prolog)
+// ============================================================================
+
+/// Trait for converting Rust types to standard Prolog list syntax [key-value, ...]
+pub trait ToPrologList {
+    fn to_prolog_list(&self) -> String;
+}
+
+impl ToPrologList for Entities {
+    fn to_prolog_list(&self) -> String {
+        let mut parts = Vec::new();
+
+        // Use single quotes for atoms in Scryer Prolog
+        if let Some(ref v) = self.topic {
+            parts.push(format!("topic-'{}'", escape_prolog_atom(v)));
+        }
+        if let Some(ref v) = self.query {
+            parts.push(format!("query-'{}'", escape_prolog_atom(v)));
+        }
+        if let Some(ref v) = self.location {
+            parts.push(format!("location-'{}'", escape_prolog_atom(v)));
+        }
+        if let Some(ref v) = self.date {
+            parts.push(format!("date-'{}'", escape_prolog_atom(v)));
+        }
+        if let Some(ref v) = self.recipient {
+            parts.push(format!("recipient-'{}'", escape_prolog_atom(v)));
+        }
+        if let Some(ref v) = self.priority {
+            parts.push(format!("priority-'{}'", escape_prolog_atom(v)));
+        }
+
+        format!("[{}]", parts.join(", "))
+    }
+}
+
+impl ToPrologList for Constraints {
+    fn to_prolog_list(&self) -> String {
+        let source_pref = match self.source_preference {
+            SourcePreference::Notes => "notes",
+            SourcePreference::Files => "files",
+            SourcePreference::Either => "either",
+        };
+
+        format!(
+            "[source_preference-{}, safety-'{}']",
+            source_pref,
+            escape_prolog_atom(&self.safety)
+        )
+    }
+}
+
+fn escape_prolog_atom(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 // ============================================================================
@@ -471,6 +537,19 @@ fn run_tool(tool: &str, args: &serde_json::Value) -> String {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Determine router path based on backend if not specified
+    #[allow(unused_variables)]
+    let router_path = args.router_path.unwrap_or_else(|| {
+        #[cfg(feature = "scryer-backend")]
+        {
+            PathBuf::from("router_standard.pl")
+        }
+        #[cfg(not(feature = "scryer-backend"))]
+        {
+            PathBuf::from("../router.pl")
+        }
+    });
+
     // Extract intent (stub or LLM)
     let mut payload = if args.use_llm {
         eprintln!("DEBUG: Using LLM intent extractor");
@@ -514,13 +593,35 @@ fn main() -> Result<()> {
         eprintln!("DEBUG: Using stub Prolog router");
         prolog_decide_stub(&payload)
     } else {
-        eprintln!("DEBUG: Using real SWI-Prolog with router: {}", args.router_path.display());
-        match prolog::prolog_decide_via_json(&payload, &args.router_path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("WARNING: Prolog error ({}), falling back to stub", e);
-                prolog_decide_stub(&payload)
+        // Choose backend based on compiled features
+        #[cfg(feature = "scryer-backend")]
+        {
+            eprintln!("DEBUG: Using Scryer Prolog with router: {}", router_path.display());
+            match scryer::scryer_decide(&payload, &router_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("WARNING: Scryer error ({}), falling back to stub", e);
+                    prolog_decide_stub(&payload)
+                }
             }
+        }
+
+        #[cfg(all(feature = "swipl-backend", not(feature = "scryer-backend")))]
+        {
+            eprintln!("DEBUG: Using SWI-Prolog with router: {}", router_path.display());
+            match prolog::prolog_decide_via_json(&payload, &router_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("WARNING: Prolog error ({}), falling back to stub", e);
+                    prolog_decide_stub(&payload)
+                }
+            }
+        }
+
+        #[cfg(not(any(feature = "swipl-backend", feature = "scryer-backend")))]
+        {
+            eprintln!("DEBUG: No Prolog backend compiled, using stub router");
+            prolog_decide_stub(&payload)
         }
     };
 
@@ -643,5 +744,33 @@ mod tests {
         let dict = entities.to_prolog_dict();
         assert!(dict.contains("topic:\"AI notes\""));
         assert!(!dict.contains("location")); // None fields should be skipped
+    }
+
+    #[test]
+    fn test_prolog_list_generation() {
+        let entities = Entities {
+            topic: Some("AI notes".to_string()),
+            location: Some("NYC".to_string()),
+            ..Default::default()
+        };
+
+        let list = entities.to_prolog_list();
+        assert!(list.starts_with('['));
+        assert!(list.ends_with(']'));
+        assert!(list.contains("topic-'AI notes'"));
+        assert!(list.contains("location-'NYC'"));
+        assert!(!list.contains("date")); // None fields should be skipped
+    }
+
+    #[test]
+    fn test_constraints_list_generation() {
+        let constraints = Constraints {
+            source_preference: SourcePreference::Notes,
+            safety: "normal".to_string(),
+        };
+
+        let list = constraints.to_prolog_list();
+        assert!(list.contains("source_preference-notes"));
+        assert!(list.contains("safety-'normal'"));
     }
 }

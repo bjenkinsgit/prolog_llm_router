@@ -87,23 +87,37 @@ cd rust_sketch
 export SWI_HOME_DIR=/Applications/SWI-Prolog.app/Contents/swipl
 cargo run -- "summarize my notes about AI"
 
-# Run with stub router (no SWI-Prolog needed)
+# Run with Scryer Prolog (pure Rust, no external dependencies!)
+cargo run --no-default-features --features scryer-backend -- "summarize my notes about AI"
+
+# Run with stub router (no Prolog needed)
 cargo run -- --stub "summarize my notes about AI"
 
 # Run with LLM intent extraction (requires LLM server at http://alien.local:8000)
 cargo run -- --use-llm --stub "what's the weather tomorrow in NYC"
 
 # Run tests
-cargo test
+cargo test                                              # Test swipl backend
+cargo test --no-default-features --features scryer-backend  # Test Scryer backend
 ```
 
+## Backend Comparison
+
+| Feature | SWI-Prolog (`swipl-backend`) | Scryer (`scryer-backend`) |
+|---------|------------------------------|---------------------------|
+| External deps | Requires SWI-Prolog installed | None (pure Rust) |
+| Environment | Needs `SWI_HOME_DIR` on macOS | None |
+| Dict syntax | `_{key:value}` (SWI-specific) | `[key-value]` (standard) |
+| Router file | `router.pl` | `router_standard.pl` |
+| Thread safety | Limited (FFI issues) | Good |
+
 **Prerequisites:**
-- SWI-Prolog must be installed for the `swipl` crate to build
-- On macOS, set `SWI_HOME_DIR` to the swipl resources directory
+- **swipl-backend** (default): SWI-Prolog installed, `SWI_HOME_DIR` set on macOS
+- **scryer-backend**: None! Just Rust.
 - For `--use-llm`, an OpenAI-compatible LLM server at `http://alien.local:8000/v1`
 
 **CLI Options:**
-- `--stub` - Use stub Prolog router instead of real SWI-Prolog
+- `--stub` - Use stub Prolog router instead of real Prolog
 - `--use-llm` - Use LLM for intent extraction instead of stub heuristics
-- `--router <path>` - Path to router.pl file (default: `../router.pl`)
+- `--router <path>` - Path to router file (auto-detected based on backend)
 - `--date`, `--location`, `--recipient`, `--source` - Override extracted entities
