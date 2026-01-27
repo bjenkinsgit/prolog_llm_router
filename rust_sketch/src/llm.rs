@@ -1,15 +1,22 @@
 //! LLM-based intent extraction using OpenAI-compatible API
 
 use anyhow::{anyhow, Result};
+use chrono::Local;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
 use crate::{Constraints, Entities, IntentPayload, IntentType, SourcePreference, WeatherQueryType};
 
 const LLM_BASE_URL: &str = "http://alien.local:8000/v1";
 const LLM_MODEL: &str = "openai/gpt-oss-20b";
 
-const SYSTEM_PROMPT: &str = r#"You are an intent extractor for a tool-routing system.
+/// Default prompt file path (relative to working directory)
+const PROMPT_FILE: &str = "prompts/intent_extractor.md";
+
+/// Fallback prompt if file cannot be loaded
+const FALLBACK_PROMPT: &str = r#"You are an intent extractor for a tool-routing system.
 Extract the user's intent and relevant entities from their message.
 Output ONLY a single JSON object. No markdown. No explanation.
 
@@ -20,8 +27,8 @@ Schema:
     "topic": string or null,
     "query": string or null,
     "location": string or null,
-    "date": string or null,
-    "date_end": string or null,
+    "date": "YYYY-MM-DD or null",
+    "date_end": "YYYY-MM-DD or null",
     "recipient": string or null,
     "priority": string or null,
     "weather_query": "current|forecast|assessment" or null
@@ -34,30 +41,73 @@ Schema:
 
 Rules:
 - Choose intent from: summarize, find, draft, remind, weather, unknown
-- Put the main subject into entities.topic when relevant
-- If user explicitly mentions notes/files, set source_preference accordingly; otherwise "either"
-- If missing critical info (e.g. weather without location/date), leave those entities as null
-- Extract dates in natural language form (e.g., "tomorrow", "next Friday", "2026-02-10")
-- For date ranges (e.g., "next week", "next 5 days"), set both date (start) and date_end
-- For weather queries:
-  - weather_query: "current" for single-day weather (default)
-  - weather_query: "forecast" for multi-day forecasts ("next week", "forecast")
-  - weather_query: "assessment" for "bad weather?", "will it rain?", "expecting storms?"
-- Do not output anything after the final closing brace '}'
+- Convert ALL dates to YYYY-MM-DD format
+- For date ranges, set both date (start) and date_end
+- weather_query: "current" (default), "forecast" (multi-day), "assessment" (bad weather check)
 "#;
 
-/// Request body for the Responses API
+/// Load the system prompt from file, with {{TODAY}} substitution
+fn load_system_prompt() -> String {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+
+    // Try to load from file
+    let prompt = if Path::new(PROMPT_FILE).exists() {
+        match fs::read_to_string(PROMPT_FILE) {
+            Ok(content) => {
+                eprintln!("DEBUG: Loaded prompt from {}", PROMPT_FILE);
+                content
+            }
+            Err(e) => {
+                eprintln!("WARNING: Failed to read {}: {}, using fallback", PROMPT_FILE, e);
+                FALLBACK_PROMPT.to_string()
+            }
+        }
+    } else {
+        eprintln!("DEBUG: Prompt file not found, using fallback");
+        FALLBACK_PROMPT.to_string()
+    };
+
+    // Replace {{TODAY}} placeholder with actual date
+    prompt.replace("{{TODAY}}", &today)
+}
+
+/// Request body for the Responses API (internal)
 #[derive(Serialize)]
-struct ResponsesRequest {
+struct ResponsesApiRequest {
     model: String,
     input: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
+}
+
+/// Public LLM request for generic calls
+#[derive(Debug, Clone, Default)]
+pub struct LlmRequest {
+    /// The input text/prompt
+    pub input: String,
+    /// Optional system instructions
+    pub instructions: Option<String>,
+    /// Previous response ID for conversation continuation
+    pub previous_response_id: Option<String>,
+}
+
+/// Public LLM response
+#[derive(Debug, Clone)]
+pub struct LlmResponse {
+    /// Response ID for continuation
+    pub id: Option<String>,
+    /// The text output from the model
+    pub output_text: String,
 }
 
 /// Response from the Responses API
 #[derive(Deserialize, Debug)]
-struct ResponsesResponse {
+struct ResponsesApiResponse {
+    /// Response ID for conversation continuation
+    #[serde(default)]
+    id: Option<String>,
     output: Vec<OutputItem>,
     #[serde(default)]
     output_text: Option<String>,
@@ -103,19 +153,41 @@ struct RawConstraints {
 
 /// Extract intent from user text using LLM
 pub fn extract_intent_llm(user_text: &str) -> Result<IntentPayload> {
+    let system_prompt = load_system_prompt();
+
+    let request = LlmRequest {
+        input: format!("{}\n\nUSER:\n{}", system_prompt, user_text),
+        instructions: None,
+        previous_response_id: None,
+    };
+
+    let response = call_llm(&request)?;
+
+    eprintln!("DEBUG: LLM raw response: {}", response.output_text);
+
+    // Parse JSON from text
+    let raw = parse_json_from_text(&response.output_text)?;
+
+    // Normalize to our strict types
+    Ok(normalize_intent_payload(raw))
+}
+
+/// Generic LLM call function for agent and other uses
+pub fn call_llm(request: &LlmRequest) -> Result<LlmResponse> {
     let client = Client::new();
 
-    let request = ResponsesRequest {
+    let api_request = ResponsesApiRequest {
         model: LLM_MODEL.to_string(),
-        input: format!("{}\n\nUSER:\n{}", SYSTEM_PROMPT, user_text),
-        instructions: None,
+        input: request.input.clone(),
+        instructions: request.instructions.clone(),
+        previous_response_id: request.previous_response_id.clone(),
     };
 
     eprintln!("DEBUG: Calling LLM at {}/responses", LLM_BASE_URL);
 
     let response = client
         .post(format!("{}/responses", LLM_BASE_URL))
-        .json(&request)
+        .json(&api_request)
         .send()
         .map_err(|e| anyhow!("LLM request failed: {}", e))?;
 
@@ -125,23 +197,21 @@ pub fn extract_intent_llm(user_text: &str) -> Result<IntentPayload> {
         return Err(anyhow!("LLM error {}: {}", status, body));
     }
 
-    let resp: ResponsesResponse = response
+    let resp: ResponsesApiResponse = response
         .json()
         .map_err(|e| anyhow!("Failed to parse LLM response: {}", e))?;
 
     // Extract text from response
-    let text = extract_text_from_response(&resp)?;
-    eprintln!("DEBUG: LLM raw response: {}", text);
+    let output_text = extract_text_from_response(&resp)?;
 
-    // Parse JSON from text
-    let raw = parse_json_from_text(&text)?;
-
-    // Normalize to our strict types
-    Ok(normalize_intent_payload(raw))
+    Ok(LlmResponse {
+        id: resp.id,
+        output_text,
+    })
 }
 
 /// Extract text content from Responses API response
-fn extract_text_from_response(resp: &ResponsesResponse) -> Result<String> {
+fn extract_text_from_response(resp: &ResponsesApiResponse) -> Result<String> {
     let mut chunks = Vec::new();
 
     for item in &resp.output {

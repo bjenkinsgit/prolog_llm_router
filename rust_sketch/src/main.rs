@@ -13,6 +13,7 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod agent;
 mod apple_maps;
 mod apple_weather;
 mod derive_sketch;
@@ -67,6 +68,14 @@ struct Args {
     /// Path to tools configuration JSON file for HTTP tool execution
     #[arg(long = "tools")]
     tools_path: Option<PathBuf>,
+
+    /// Use agentic mode (LLM decides actions in a loop)
+    #[arg(long = "agent")]
+    agent_mode: bool,
+
+    /// Maximum turns for agent mode before stopping
+    #[arg(long = "max-turns", default_value = "10")]
+    max_turns: u32,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -958,7 +967,19 @@ fn main() -> Result<()> {
         None
     };
 
-    // Extract intent (stub or LLM)
+    // Agent mode: run agentic loop instead of single-shot
+    if args.agent_mode {
+        eprintln!("DEBUG: Running in agent mode with max_turns={}", args.max_turns);
+        let config = agent::AgentConfig {
+            max_turns: args.max_turns,
+            verbose: true,
+        };
+        let answer = agent::run_agent_loop(&args.user_text, &config, tool_executor.as_ref())?;
+        println!("{}", answer);
+        return Ok(());
+    }
+
+    // Single-shot mode: extract intent (stub or LLM)
     let mut payload = if args.use_llm {
         eprintln!("DEBUG: Using LLM intent extractor");
         match llm::extract_intent_llm(&args.user_text) {
