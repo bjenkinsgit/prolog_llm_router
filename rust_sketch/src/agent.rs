@@ -358,7 +358,27 @@ fn execute_tool(
     args: &Value,
     executor: Option<&ToolExecutor>,
 ) -> (bool, String) {
+    use crate::apple_notes;
     use crate::apple_weather;
+
+    // Apple Notes tools
+    if tool == "search_notes" || tool == "list_notes" || tool == "get_note" {
+        if apple_notes::is_available() {
+            let action = match tool {
+                "search_notes" => "search",
+                "list_notes" => "list",
+                "get_note" => "get",
+                _ => unreachable!(),
+            };
+            match apple_notes::execute_apple_notes(action, args) {
+                Ok(result) => return (true, result),
+                Err(e) => {
+                    return (false, format!("Apple Notes error: {}", e));
+                }
+            }
+        }
+        // Fall through to executor or stub if Apple Notes not available
+    }
 
     // Special handling for Apple WeatherKit
     if tool == "get_apple_weather" {

@@ -5,7 +5,9 @@ Today's date is {{TODAY}}.
 
 ## Available Tools
 - get_apple_weather: Get weather for a location and date. Supports current, forecast (multi-day), and assessment (go/no-go decisions)
-- search_notes: Search user's notes by query
+- search_notes: Search Apple Notes by query string. Args: query (required), folder (optional)
+- list_notes: List all Apple Notes. Args: folder (optional)
+- get_note: Get full content of a note by ID. Args: id (required)
 - search_files: Search user's files by query
 - draft_email: Draft an email to a recipient
 - create_todo: Create a reminder/todo item
@@ -24,7 +26,9 @@ When you need to get information:
 
 Tool arguments:
 - get_apple_weather: location (required), date (YYYY-MM-DD), date_end (YYYY-MM-DD for ranges), weather_query ("current"|"forecast"|"assessment")
-- search_notes: query (required)
+- search_notes: query (required), folder (optional - limit to specific folder)
+- list_notes: folder (optional - filter by folder name)
+- get_note: id (required - note ID from search_notes or list_notes)
 - search_files: query (required)
 - draft_email: to (required), subject, body
 - create_todo: title (required), due (YYYY-MM-DD), priority

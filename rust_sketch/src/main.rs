@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 mod agent;
 mod apple_maps;
+mod apple_notes;
 mod apple_weather;
 mod derive_sketch;
 mod llm;

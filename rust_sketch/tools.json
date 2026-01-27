@@ -113,20 +113,48 @@
     },
     {
       "name": "search_notes",
-      "description": "Search through user notes",
+      "description": "Search Apple Notes by query. Returns matching notes with title, folder, and snippet.",
       "parameters": {
         "type": "object",
         "properties": {
           "query": {
             "type": "string",
-            "description": "Search query"
+            "description": "Search term to find in note titles and bodies"
           },
-          "scope": {
+          "folder": {
             "type": "string",
-            "description": "Search scope (user, system, all)"
+            "description": "Optional: limit search to specific folder name"
           }
         },
         "required": ["query"]
+      }
+    },
+    {
+      "name": "list_notes",
+      "description": "List all Apple Notes, optionally filtered by folder",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "folder": {
+            "type": "string",
+            "description": "Optional: folder name to list notes from"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_note",
+      "description": "Get the full content of a specific Apple Note by ID",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The unique note ID (from search_notes or list_notes)"
+          }
+        },
+        "required": ["id"]
       }
     },
     {
