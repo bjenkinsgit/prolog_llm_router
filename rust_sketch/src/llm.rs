@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::{Constraints, Entities, IntentPayload, IntentType, SourcePreference};
+use crate::{Constraints, Entities, IntentPayload, IntentType, SourcePreference, WeatherQueryType};
 
 const LLM_BASE_URL: &str = "http://alien.local:8000/v1";
 const LLM_MODEL: &str = "openai/gpt-oss-20b";
@@ -21,8 +21,10 @@ Schema:
     "query": string or null,
     "location": string or null,
     "date": string or null,
+    "date_end": string or null,
     "recipient": string or null,
-    "priority": string or null
+    "priority": string or null,
+    "weather_query": "current|forecast|assessment" or null
   },
   "constraints": {
     "source_preference": "notes|files|either",
@@ -36,6 +38,11 @@ Rules:
 - If user explicitly mentions notes/files, set source_preference accordingly; otherwise "either"
 - If missing critical info (e.g. weather without location/date), leave those entities as null
 - Extract dates in natural language form (e.g., "tomorrow", "next Friday", "2026-02-10")
+- For date ranges (e.g., "next week", "next 5 days"), set both date (start) and date_end
+- For weather queries:
+  - weather_query: "current" for single-day weather (default)
+  - weather_query: "forecast" for multi-day forecasts ("next week", "forecast")
+  - weather_query: "assessment" for "bad weather?", "will it rain?", "expecting storms?"
 - Do not output anything after the final closing brace '}'
 "#;
 
@@ -82,8 +89,10 @@ struct RawEntities {
     query: Option<String>,
     location: Option<String>,
     date: Option<String>,
+    date_end: Option<String>,
     recipient: Option<String>,
     priority: Option<String>,
+    weather_query: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -226,13 +235,26 @@ fn normalize_intent_payload(raw: RawIntentPayload) -> IntentPayload {
 
     // Map entities
     let raw_entities = raw.entities.unwrap_or_default();
+
+    // Map weather_query string to enum
+    let weather_query = raw_entities.weather_query.as_deref().and_then(|s| {
+        match s.to_lowercase().as_str() {
+            "current" => Some(WeatherQueryType::Current),
+            "forecast" => Some(WeatherQueryType::Forecast),
+            "assessment" => Some(WeatherQueryType::Assessment),
+            _ => None,
+        }
+    });
+
     let entities = Entities {
         topic: raw_entities.topic,
         query: raw_entities.query,
         location: raw_entities.location,
         date: raw_entities.date,
+        date_end: raw_entities.date_end,
         recipient: raw_entities.recipient,
         priority: raw_entities.priority,
+        weather_query,
     };
 
     // Map constraints

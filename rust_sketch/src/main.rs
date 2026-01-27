@@ -13,6 +13,7 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod apple_maps;
 mod apple_weather;
 mod derive_sketch;
 mod llm;
@@ -125,6 +126,15 @@ pub enum SourcePreference {
     Either,
 }
 
+/// Weather query type for different kinds of weather requests
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherQueryType {
+    Current,
+    Forecast,
+    Assessment,
+}
+
 /// Extracted entities from user input
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Entities {
@@ -140,11 +150,19 @@ pub struct Entities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
 
+    /// End date for date ranges (e.g., "next week" has date and date_end)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_end: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recipient: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+
+    /// Type of weather query: current, forecast, or assessment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weather_query: Option<WeatherQueryType>,
 }
 
 /// Routing constraints
@@ -207,11 +225,22 @@ impl ToPrologDict for Entities {
         if let Some(ref v) = self.date {
             parts.push(format!("date:\"{}\"", escape_prolog_string(v)));
         }
+        if let Some(ref v) = self.date_end {
+            parts.push(format!("date_end:\"{}\"", escape_prolog_string(v)));
+        }
         if let Some(ref v) = self.recipient {
             parts.push(format!("recipient:\"{}\"", escape_prolog_string(v)));
         }
         if let Some(ref v) = self.priority {
             parts.push(format!("priority:\"{}\"", escape_prolog_string(v)));
+        }
+        if let Some(ref v) = self.weather_query {
+            let s = match v {
+                WeatherQueryType::Current => "current",
+                WeatherQueryType::Forecast => "forecast",
+                WeatherQueryType::Assessment => "assessment",
+            };
+            parts.push(format!("weather_query:\"{}\"", s));
         }
 
         format!("_{{{}}}", parts.join(", "))
@@ -264,11 +293,22 @@ impl ToPrologList for Entities {
         if let Some(ref v) = self.date {
             parts.push(format!("date-'{}'", escape_prolog_atom(v)));
         }
+        if let Some(ref v) = self.date_end {
+            parts.push(format!("date_end-'{}'", escape_prolog_atom(v)));
+        }
         if let Some(ref v) = self.recipient {
             parts.push(format!("recipient-'{}'", escape_prolog_atom(v)));
         }
         if let Some(ref v) = self.priority {
             parts.push(format!("priority-'{}'", escape_prolog_atom(v)));
+        }
+        if let Some(ref v) = self.weather_query {
+            let s = match v {
+                WeatherQueryType::Current => "current",
+                WeatherQueryType::Forecast => "forecast",
+                WeatherQueryType::Assessment => "assessment",
+            };
+            parts.push(format!("weather_query-{}", s));
         }
 
         format!("[{}]", parts.join(", "))
@@ -363,9 +403,118 @@ pub fn today_date() -> String {
     format_date(Local::now().date_naive())
 }
 
+/// Resolve date range strings to (start_date, Option<end_date>) in YYYY-MM-DD format
+/// Returns (start, None) for single dates, (start, Some(end)) for ranges
+pub fn resolve_date_range(date_str: &str) -> (String, Option<String>) {
+    let today = Local::now().date_naive();
+    let lower = date_str.to_lowercase();
+    let trimmed = lower.trim();
+
+    // "next week" → 7 days starting today
+    if trimmed == "next week" {
+        let start = today;
+        let end = today + Days::new(6);
+        return (format_date(start), Some(format_date(end)));
+    }
+
+    // "next N days" → N days starting today
+    if let Some(rest) = trimmed.strip_prefix("next ") {
+        if let Some(days_str) = rest.strip_suffix(" days") {
+            if let Ok(n) = days_str.trim().parse::<u64>() {
+                let start = today;
+                let end = today + Days::new(n.saturating_sub(1));
+                return (format_date(start), Some(format_date(end)));
+            }
+        }
+    }
+
+    // "this weekend" → Saturday to Sunday
+    if trimmed == "this weekend" {
+        let current_weekday = today.weekday();
+        let days_until_saturday = (Weekday::Sat.num_days_from_monday() as i64
+            - current_weekday.num_days_from_monday() as i64
+            + 7)
+            % 7;
+        let days_until_saturday = if days_until_saturday == 0 && current_weekday == Weekday::Sat {
+            0 // Already Saturday
+        } else if days_until_saturday == 0 {
+            7 // Next Saturday
+        } else {
+            days_until_saturday as u64
+        };
+
+        let saturday = today + Days::new(days_until_saturday);
+        let sunday = saturday + Days::new(1);
+        return (format_date(saturday), Some(format_date(sunday)));
+    }
+
+    // "forecast" keyword without specific range implies multi-day
+    if trimmed.contains("forecast") {
+        // Default to 7-day forecast
+        let start = today;
+        let end = today + Days::new(6);
+        return (format_date(start), Some(format_date(end)));
+    }
+
+    // Single date - use existing resolver
+    (resolve_relative_date(date_str), None)
+}
+
 // ============================================================================
 // Stub Intent Extractor (heuristic-based, like Python version)
 // ============================================================================
+
+/// Extract location from weather queries using "in <city>" or "for <city>" patterns
+fn extract_weather_location(lower_text: &str, original_text: &str) -> Option<String> {
+    // Try "in <city>" pattern
+    for pattern in &[" in ", " for "] {
+        if let Some(idx) = lower_text.find(pattern) {
+            let start = idx + pattern.len();
+            let after = &original_text[start..];
+            let after_lower = after.to_lowercase();
+
+            // Take words until we hit a date keyword (with word boundary) or end
+            // Use " keyword" patterns to ensure word boundaries
+            let end_markers = [
+                " today",
+                " tomorrow",
+                " next",
+                " this",
+                "?",
+                "!",
+                ".",
+            ];
+            let mut end_idx = after.len();
+            for marker in end_markers {
+                if let Some(m_idx) = after_lower.find(marker) {
+                    if m_idx < end_idx {
+                        end_idx = m_idx;
+                    }
+                }
+            }
+            let city = after[..end_idx].trim();
+            if !city.is_empty() {
+                return Some(city.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract "next N days" pattern and return the matched string
+fn extract_next_n_days(lower_text: &str) -> Option<String> {
+    if let Some(idx) = lower_text.find("next ") {
+        let after_next = &lower_text[idx + 5..];
+        // Look for "<number> days" pattern
+        let words: Vec<&str> = after_next.split_whitespace().collect();
+        if words.len() >= 2 && words[1].starts_with("day") {
+            if words[0].parse::<u64>().is_ok() {
+                return Some(format!("next {} days", words[0]));
+            }
+        }
+    }
+    None
+}
 
 /// Simple heuristic intent extractor for testing routing
 fn extract_intent_stub(user_text: &str) -> IntentPayload {
@@ -385,7 +534,13 @@ fn extract_intent_stub(user_text: &str) -> IntentPayload {
         IntentType::Summarize
     } else if t.starts_with("find") || t.starts_with("search") || t.contains("look for") {
         IntentType::Find
-    } else if t.contains("weather") {
+    } else if t.contains("weather")
+        || t.starts_with("forecast")
+        || t.contains("forecast")
+        || t.contains("will it rain")
+        || t.contains("will it snow")
+        || t.contains("bad weather")
+    {
         IntentType::Weather
     } else if t.contains("email") || t.starts_with("draft") {
         IntentType::Draft
@@ -409,18 +564,68 @@ fn extract_intent_stub(user_text: &str) -> IntentPayload {
         }
     };
 
-    // Weather date extraction (toy)
-    let date = if intent == IntentType::Weather {
-        if t.contains("tomorrow") {
-            Some("tomorrow".to_string())
+    // Weather-specific extraction
+    let (date, date_end, location, weather_query) = if intent == IntentType::Weather {
+        // Extract location from "in <city>" or "for <city>" patterns
+        let location = extract_weather_location(&t, user_text);
+
+        // Detect weather query type
+        let weather_query = if t.contains("bad weather")
+            || t.contains("expecting")
+            || t.contains("will it rain")
+            || t.contains("will it snow")
+            || t.contains("expect rain")
+            || t.contains("expect snow")
+        {
+            Some(WeatherQueryType::Assessment)
+        } else if t.contains("forecast") || t.contains("next week") || t.contains("next ") && t.contains(" days") {
+            Some(WeatherQueryType::Forecast)
+        } else {
+            Some(WeatherQueryType::Current)
+        };
+
+        // Extract date/date range
+        let (date, date_end) = if t.contains("next week") {
+            let (start, end) = resolve_date_range("next week");
+            (Some(start), end)
+        } else if t.contains("this weekend") {
+            let (start, end) = resolve_date_range("this weekend");
+            (Some(start), end)
+        } else if let Some(cap) = extract_next_n_days(&t) {
+            let (start, end) = resolve_date_range(&cap);
+            (Some(start), end)
+        } else if t.contains("forecast") && !t.contains("tomorrow") && !t.contains("today") {
+            // Generic "forecast" without specific date → default to 7 days
+            let (start, end) = resolve_date_range("forecast");
+            (Some(start), end)
+        } else if t.contains("tomorrow") {
+            (Some(resolve_relative_date("tomorrow")), None)
         } else if t.contains("today") {
-            Some("today".to_string())
+            (Some(resolve_relative_date("today")), None)
+        } else {
+            // Default to today for current weather queries
+            (None, None)
+        };
+
+        (date, date_end, location, weather_query)
+    } else {
+        (None, None, None, None)
+    };
+
+    // For non-weather intents, date extraction (toy)
+    let date = date.or_else(|| {
+        if intent != IntentType::Weather {
+            if t.contains("tomorrow") {
+                Some("tomorrow".to_string())
+            } else if t.contains("today") {
+                Some("today".to_string())
+            } else {
+                None
+            }
         } else {
             None
         }
-    } else {
-        None
-    };
+    });
 
     // Recipient extraction for draft/email (look for "email to <name>" or "to <name>" after email keyword)
     let recipient = if intent == IntentType::Draft {
@@ -457,7 +662,10 @@ fn extract_intent_stub(user_text: &str) -> IntentPayload {
         entities: Entities {
             topic,
             date,
+            date_end,
+            location,
             recipient,
+            weather_query,
             ..Default::default()
         },
         constraints: Constraints {
@@ -540,14 +748,16 @@ pub fn prolog_decide_stub(payload: &IntentPayload) -> Decision {
                 }
             };
 
-            let date = match &entities.date {
-                Some(d) => d.clone(),
-                None => {
-                    return Decision::NeedInfo {
-                        question: "What date should I use? (e.g., today, tomorrow)".to_string(),
-                    }
-                }
-            };
+            // Date is now optional - defaults to today for current weather
+            let date = entities.date.clone();
+
+            // Get date_end and weather_query for forecasts/assessments
+            let date_end = entities.date_end.clone();
+            let weather_query = entities.weather_query.as_ref().map(|q| match q {
+                WeatherQueryType::Current => "current",
+                WeatherQueryType::Forecast => "forecast",
+                WeatherQueryType::Assessment => "assessment",
+            });
 
             // Prefer Apple WeatherKit if configured, otherwise use OpenWeatherMap
             let tool = if apple_weather::is_configured() {
@@ -556,12 +766,24 @@ pub fn prolog_decide_stub(payload: &IntentPayload) -> Decision {
                 "get_weather"
             };
 
+            let mut args = serde_json::json!({
+                "location": location
+            });
+
+            // Add optional fields only if present
+            if let Some(d) = date {
+                args["date"] = serde_json::Value::String(d);
+            }
+            if let Some(de) = date_end {
+                args["date_end"] = serde_json::Value::String(de);
+            }
+            if let Some(wq) = weather_query {
+                args["weather_query"] = serde_json::Value::String(wq.to_string());
+            }
+
             Decision::Route {
                 tool: tool.to_string(),
-                args: serde_json::json!({
-                    "location": location,
-                    "date": date
-                }),
+                args,
             }
         }
 
@@ -653,8 +875,15 @@ fn run_tool(
     if tool == "get_apple_weather" {
         if apple_weather::is_configured() {
             let location = args["location"].as_str().unwrap_or("NYC");
-            let date = args["date"].as_str().unwrap_or("today");
-            match apple_weather::execute_apple_weather(location, date) {
+            let date = args.get("date").and_then(|v| v.as_str());
+            let date_end = args.get("date_end").and_then(|v| v.as_str());
+            let query_type = args
+                .get("weather_query")
+                .and_then(|v| v.as_str())
+                .map(apple_weather::QueryType::from_str)
+                .unwrap_or_default();
+
+            match apple_weather::execute_apple_weather(location, date, date_end, query_type) {
                 Ok(result) => return result,
                 Err(e) => {
                     eprintln!("WARNING: Apple Weather failed: {}", e);
@@ -849,7 +1078,50 @@ mod tests {
     fn test_stub_extractor_weather() {
         let payload = extract_intent_stub("what's the weather tomorrow");
         assert_eq!(payload.intent, IntentType::Weather);
-        assert_eq!(payload.entities.date, Some("tomorrow".to_string()));
+        // Date is now resolved to absolute format
+        let expected = (Local::now().date_naive() + Days::new(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(payload.entities.date, Some(expected));
+        assert_eq!(payload.entities.weather_query, Some(WeatherQueryType::Current));
+    }
+
+    #[test]
+    fn test_stub_extractor_weather_with_location() {
+        let payload = extract_intent_stub("what's the weather in London tomorrow");
+        assert_eq!(payload.intent, IntentType::Weather);
+        assert_eq!(payload.entities.location, Some("London".to_string()));
+        assert!(payload.entities.date.is_some());
+    }
+
+    #[test]
+    fn test_stub_extractor_weather_forecast() {
+        let payload = extract_intent_stub("forecast for Seattle next week");
+        assert_eq!(payload.intent, IntentType::Weather);
+        assert_eq!(payload.entities.location, Some("Seattle".to_string()));
+        assert_eq!(payload.entities.weather_query, Some(WeatherQueryType::Forecast));
+        // Should have both date and date_end for "next week"
+        assert!(payload.entities.date.is_some());
+        assert!(payload.entities.date_end.is_some());
+    }
+
+    #[test]
+    fn test_stub_extractor_weather_assessment() {
+        let payload = extract_intent_stub("bad weather in Chicago tomorrow");
+        assert_eq!(payload.intent, IntentType::Weather);
+        assert_eq!(payload.entities.location, Some("Chicago".to_string()));
+        assert_eq!(payload.entities.weather_query, Some(WeatherQueryType::Assessment));
+    }
+
+    #[test]
+    fn test_stub_extractor_will_it_rain() {
+        let payload = extract_intent_stub("will it rain in Boston this weekend");
+        assert_eq!(payload.intent, IntentType::Weather);
+        assert_eq!(payload.entities.location, Some("Boston".to_string()));
+        assert_eq!(payload.entities.weather_query, Some(WeatherQueryType::Assessment));
+        // "this weekend" should produce a date range
+        assert!(payload.entities.date.is_some());
+        assert!(payload.entities.date_end.is_some());
     }
 
     #[test]
@@ -1033,5 +1305,75 @@ mod tests {
         let mixed = resolve_relative_date("ToDay");
         assert_eq!(lower, upper);
         assert_eq!(lower, mixed);
+    }
+
+    #[test]
+    fn test_resolve_date_range_next_week() {
+        let (start, end) = resolve_date_range("next week");
+        let today = Local::now().date_naive();
+        let expected_start = format_date(today);
+        let expected_end = format_date(today + Days::new(6));
+        assert_eq!(start, expected_start);
+        assert_eq!(end, Some(expected_end));
+    }
+
+    #[test]
+    fn test_resolve_date_range_next_n_days() {
+        let (start, end) = resolve_date_range("next 5 days");
+        let today = Local::now().date_naive();
+        let expected_start = format_date(today);
+        let expected_end = format_date(today + Days::new(4));
+        assert_eq!(start, expected_start);
+        assert_eq!(end, Some(expected_end));
+    }
+
+    #[test]
+    fn test_resolve_date_range_this_weekend() {
+        let (start, end) = resolve_date_range("this weekend");
+        // Should return Saturday and Sunday
+        assert!(start.len() == 10); // YYYY-MM-DD
+        assert!(end.is_some());
+        let end = end.unwrap();
+        assert!(end.len() == 10);
+        // End should be one day after start
+        let start_date = NaiveDate::parse_from_str(&start, "%Y-%m-%d").unwrap();
+        let end_date = NaiveDate::parse_from_str(&end, "%Y-%m-%d").unwrap();
+        assert_eq!(start_date.weekday(), Weekday::Sat);
+        assert_eq!(end_date.weekday(), Weekday::Sun);
+    }
+
+    #[test]
+    fn test_resolve_date_range_single_date() {
+        let (start, end) = resolve_date_range("tomorrow");
+        let expected = resolve_relative_date("tomorrow");
+        assert_eq!(start, expected);
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_weather_query_type_serialization() {
+        let entities = Entities {
+            location: Some("NYC".to_string()),
+            weather_query: Some(WeatherQueryType::Forecast),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&entities).unwrap();
+        assert!(json.contains("\"weather_query\":\"forecast\""));
+    }
+
+    #[test]
+    fn test_prolog_dict_with_weather_query() {
+        let entities = Entities {
+            location: Some("NYC".to_string()),
+            date: Some("2026-01-27".to_string()),
+            date_end: Some("2026-02-02".to_string()),
+            weather_query: Some(WeatherQueryType::Forecast),
+            ..Default::default()
+        };
+        let dict = entities.to_prolog_dict();
+        assert!(dict.contains("location:\"NYC\""));
+        assert!(dict.contains("date:\"2026-01-27\""));
+        assert!(dict.contains("date_end:\"2026-02-02\""));
+        assert!(dict.contains("weather_query:\"forecast\""));
     }
 }

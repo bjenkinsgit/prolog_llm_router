@@ -36,6 +36,9 @@ base64 = "0.22"
 # Load environment variables from .env file
 dotenvy = "0.15"
 
+# URL encoding for API queries
+urlencoding = "2.1"
+
 [features]
 default = ["swipl-backend"]
 swipl-backend = ["swipl"]      # Use SWI-Prolog (requires external install)

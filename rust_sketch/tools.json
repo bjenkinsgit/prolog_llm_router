@@ -34,7 +34,7 @@
     },
     {
       "name": "get_apple_weather",
-      "description": "Get current weather for a location using Apple WeatherKit (requires APPLE_TEAM_ID, APPLE_SERVICE_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY_PATH env vars)",
+      "description": "Get weather for a location using Apple WeatherKit. Supports current weather, forecasts, and bad weather assessments.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -44,10 +44,19 @@
           },
           "date": {
             "type": "string",
-            "description": "Date in YYYY-MM-DD format"
+            "description": "Start date in YYYY-MM-DD format (optional, defaults to today)"
+          },
+          "date_end": {
+            "type": "string",
+            "description": "End date in YYYY-MM-DD format for date ranges (optional)"
+          },
+          "weather_query": {
+            "type": "string",
+            "enum": ["current", "forecast", "assessment"],
+            "description": "Type of weather query: current (single day), forecast (multi-day), assessment (bad weather check)"
           }
         },
-        "required": ["location", "date"]
+        "required": ["location"]
       }
     },
     {

@@ -327,12 +327,30 @@ fn format_condition(code: &str) -> &str {
     }
 }
 
-/// Simple geocoding for common cities
-/// In production, use Apple Maps Geocoding API or similar service
+/// Geocode a city name to coordinates
+/// First checks hardcoded lookup table, then falls back to Apple Maps API
 fn geocode_city(city: &str) -> Result<(f64, f64)> {
+    // Try hardcoded lookup first (fast, no network)
+    if let Some(coords) = geocode_city_hardcoded(city) {
+        return Ok(coords);
+    }
+
+    // Fall back to Apple Maps geocoding API
+    if crate::apple_maps::is_configured() {
+        eprintln!("DEBUG: City '{}' not in cache, using Apple Maps geocoding", city);
+        return crate::apple_maps::geocode(city);
+    }
+
+    Err(anyhow!(
+        "Unknown city: '{}'. Configure Apple Maps or use a known city name.",
+        city
+    ))
+}
+
+/// Hardcoded lookup table for common cities (fast, no network)
+fn geocode_city_hardcoded(city: &str) -> Option<(f64, f64)> {
     let city_lower = city.to_lowercase();
 
-    // Common cities lookup table
     let coords = match city_lower.as_str() {
         "new york" | "nyc" | "new york city" => (40.7128, -74.0060),
         "los angeles" | "la" => (34.0522, -118.2437),
@@ -374,24 +392,256 @@ fn geocode_city(city: &str) -> Result<(f64, f64)> {
         "buenos aires" => (-34.6037, -58.3816),
         "cairo" => (30.0444, 31.2357),
         "moscow" => (55.7558, 37.6173),
-        _ => return Err(anyhow!(
-            "Unknown city: '{}'. Please provide coordinates or use a known city name.",
-            city
-        )),
+        _ => return None,
     };
 
-    Ok(coords)
+    Some(coords)
+}
+
+// ============================================================================
+// Weather Assessment Logic
+// ============================================================================
+
+/// Conditions considered "bad weather"
+const BAD_CONDITIONS: &[&str] = &[
+    "Rain",
+    "HeavyRain",
+    "Drizzle",
+    "Snow",
+    "HeavySnow",
+    "Flurries",
+    "Sleet",
+    "FreezingRain",
+    "Thunderstorms",
+    "Hail",
+    "Blizzard",
+    "TropicalStorm",
+    "Hurricane",
+    "SevereThunderstorm",
+];
+
+/// Assessment of a day's weather
+#[derive(Debug)]
+pub struct DayAssessment {
+    pub date: String,
+    pub is_bad: bool,
+    pub reasons: Vec<String>,
+    pub condition: String,
+    pub temp_high: f64,
+    pub temp_low: f64,
+    pub precip_chance: f64,
+}
+
+/// Assess if a day's weather is "bad"
+pub fn assess_day_weather(day: &DayWeather, unit: TemperatureUnit) -> DayAssessment {
+    let mut is_bad = false;
+    let mut reasons = Vec::new();
+
+    // Check condition
+    if BAD_CONDITIONS.contains(&day.condition_code.as_str()) {
+        is_bad = true;
+        reasons.push(format!("{} expected", format_condition(&day.condition_code)));
+    }
+
+    // Check precipitation chance (> 50%)
+    if day.precipitation_chance > 0.50 {
+        is_bad = true;
+        reasons.push(format!(
+            "{:.0}% chance of precipitation",
+            day.precipitation_chance * 100.0
+        ));
+    }
+
+    // Check extreme temperatures (< 0°C or > 35°C)
+    // Note: We check in Celsius regardless of display unit
+    if day.temperature_min < 0.0 {
+        is_bad = true;
+        let temp = convert_temp(day.temperature_min, unit);
+        reasons.push(format!("freezing temps (low {:.0}{})", temp, unit.suffix()));
+    }
+    if day.temperature_max > 35.0 {
+        is_bad = true;
+        let temp = convert_temp(day.temperature_max, unit);
+        reasons.push(format!("extreme heat (high {:.0}{})", temp, unit.suffix()));
+    }
+
+    // Extract date from forecast_start (format: "2026-01-27T00:00:00Z")
+    let date = day.forecast_start.split('T').next().unwrap_or(&day.forecast_start).to_string();
+
+    DayAssessment {
+        date,
+        is_bad,
+        reasons,
+        condition: day.condition_code.clone(),
+        temp_high: day.temperature_max,
+        temp_low: day.temperature_min,
+        precip_chance: day.precipitation_chance,
+    }
 }
 
 // ============================================================================
 // Integration with Tool Executor
 // ============================================================================
 
-/// Execute Apple Weather tool - to be called from tools.rs
-pub fn execute_apple_weather(location: &str, _date: &str) -> Result<String> {
+/// Weather query type for execute_apple_weather
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum QueryType {
+    #[default]
+    Current,
+    Forecast,
+    Assessment,
+}
+
+impl QueryType {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "forecast" => QueryType::Forecast,
+            "assessment" => QueryType::Assessment,
+            _ => QueryType::Current,
+        }
+    }
+}
+
+/// Execute Apple Weather tool with support for forecasts and assessments
+/// Returns JSON-formatted result for consistency with other tool outputs
+pub fn execute_apple_weather(
+    location: &str,
+    date: Option<&str>,
+    date_end: Option<&str>,
+    query_type: QueryType,
+) -> Result<String> {
     let config = WeatherKitConfig::from_env()?;
     let client = WeatherKitClient::new(config)?;
-    client.get_weather_by_city(location)
+
+    // Get coordinates
+    let (lat, lon) = geocode_city(location)?;
+    let weather = client.get_weather(lat, lon, "en")?;
+    let unit = TemperatureUnit::from_env();
+    let suffix = unit.suffix();
+
+    let result = match query_type {
+        QueryType::Current => {
+            // Single day current weather
+            let current = weather
+                .current_weather
+                .ok_or_else(|| anyhow!("No current weather data available"))?;
+
+            let temp = convert_temp(current.temperature, unit);
+            let feels_like = convert_temp(current.temperature_apparent, unit);
+
+            serde_json::json!({
+                "location": location,
+                "query_type": "current",
+                "current": {
+                    "temperature": format!("{:.1}{}", temp, suffix),
+                    "feels_like": format!("{:.1}{}", feels_like, suffix),
+                    "condition": format_condition(&current.condition_code),
+                    "humidity": format!("{:.0}%", current.humidity * 100.0),
+                    "wind_speed": format!("{:.1} km/h", current.wind_speed),
+                    "uv_index": current.uv_index
+                }
+            })
+        }
+
+        QueryType::Forecast => {
+            // Multi-day forecast
+            let forecast = weather
+                .forecast_daily
+                .ok_or_else(|| anyhow!("No forecast data available"))?;
+
+            let days = filter_days_by_range(&forecast.days, date, date_end);
+
+            if days.is_empty() {
+                return Err(anyhow!("No forecast data for specified date range"));
+            }
+
+            let forecast_days: Vec<serde_json::Value> = days
+                .iter()
+                .map(|day| {
+                    let date_str = day.forecast_start.split('T').next().unwrap_or(&day.forecast_start);
+                    let high = convert_temp(day.temperature_max, unit);
+                    let low = convert_temp(day.temperature_min, unit);
+                    serde_json::json!({
+                        "date": date_str,
+                        "condition": format_condition(&day.condition_code),
+                        "high": format!("{:.0}{}", high, suffix),
+                        "low": format!("{:.0}{}", low, suffix),
+                        "precipitation_chance": format!("{:.0}%", day.precipitation_chance * 100.0)
+                    })
+                })
+                .collect();
+
+            serde_json::json!({
+                "location": location,
+                "query_type": "forecast",
+                "forecast": forecast_days
+            })
+        }
+
+        QueryType::Assessment => {
+            // Bad weather assessment
+            let forecast = weather
+                .forecast_daily
+                .ok_or_else(|| anyhow!("No forecast data available"))?;
+
+            let days = filter_days_by_range(&forecast.days, date, date_end);
+
+            if days.is_empty() {
+                return Err(anyhow!("No forecast data for specified date range"));
+            }
+
+            let assessments: Vec<DayAssessment> = days
+                .iter()
+                .map(|d| assess_day_weather(d, unit))
+                .collect();
+
+            let bad_days: Vec<serde_json::Value> = assessments
+                .iter()
+                .filter(|a| a.is_bad)
+                .map(|a| {
+                    serde_json::json!({
+                        "date": a.date,
+                        "reasons": a.reasons
+                    })
+                })
+                .collect();
+
+            let has_bad_weather = !bad_days.is_empty();
+
+            serde_json::json!({
+                "location": location,
+                "query_type": "assessment",
+                "has_bad_weather": has_bad_weather,
+                "bad_days": bad_days,
+                "days_checked": assessments.len()
+            })
+        }
+    };
+
+    serde_json::to_string_pretty(&result).map_err(|e| anyhow!("Failed to serialize result: {}", e))
+}
+
+/// Filter forecast days by date range (inclusive)
+/// If end_date is None, it defaults to start_date (single day query)
+/// If neither is provided, returns all days
+fn filter_days_by_range<'a>(
+    days: &'a [DayWeather],
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Vec<&'a DayWeather> {
+    // If no end date provided, treat it as same as start (single day)
+    let effective_end = end_date.or(start_date);
+
+    days.iter()
+        .filter(|day| {
+            let day_date = day.forecast_start.split('T').next().unwrap_or("");
+
+            let after_start = start_date.map(|s| day_date >= s).unwrap_or(true);
+            let before_end = effective_end.map(|e| day_date <= e).unwrap_or(true);
+
+            after_start && before_end
+        })
+        .collect()
 }
 
 /// Check if Apple WeatherKit is configured
@@ -412,18 +662,18 @@ mod tests {
 
     #[test]
     fn test_geocode_known_cities() {
-        let (lat, lon) = geocode_city("NYC").unwrap();
-        assert!((lat - 40.7128).abs() < 0.01);
-        assert!((lon - (-74.0060)).abs() < 0.01);
+        let coords = geocode_city_hardcoded("NYC").unwrap();
+        assert!((coords.0 - 40.7128).abs() < 0.01);
+        assert!((coords.1 - (-74.0060)).abs() < 0.01);
 
-        let (lat, lon) = geocode_city("London").unwrap();
-        assert!((lat - 51.5074).abs() < 0.01);
+        let coords = geocode_city_hardcoded("London").unwrap();
+        assert!((coords.0 - 51.5074).abs() < 0.01);
     }
 
     #[test]
-    fn test_geocode_unknown_city() {
-        let result = geocode_city("Nonexistent City XYZ");
-        assert!(result.is_err());
+    fn test_geocode_unknown_city_hardcoded() {
+        let result = geocode_city_hardcoded("Nonexistent City XYZ");
+        assert!(result.is_none());
     }
 
     #[test]
