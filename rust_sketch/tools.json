@@ -1,0 +1,186 @@
+{
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get current weather for a location using OpenWeatherMap",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "City name or location"
+          },
+          "date": {
+            "type": "string",
+            "description": "Date in YYYY-MM-DD format"
+          }
+        },
+        "required": ["location", "date"]
+      },
+      "endpoint": {
+        "url": "https://api.openweathermap.org/data/2.5/weather",
+        "method": "GET",
+        "query": {
+          "q": "{{location}}",
+          "appid": "${OPENWEATHER_API_KEY}",
+          "units": "metric"
+        },
+        "headers": {
+          "Accept": "application/json"
+        },
+        "response_path": "$.weather[0].description",
+        "timeout_secs": 10
+      }
+    },
+    {
+      "name": "get_apple_weather",
+      "description": "Get current weather for a location using Apple WeatherKit (requires APPLE_TEAM_ID, APPLE_SERVICE_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY_PATH env vars)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "City name (e.g., NYC, London, Tokyo)"
+          },
+          "date": {
+            "type": "string",
+            "description": "Date in YYYY-MM-DD format"
+          }
+        },
+        "required": ["location", "date"]
+      }
+    },
+    {
+      "name": "echo_test",
+      "description": "Test tool that echoes arguments via httpbin (for testing)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Message to echo"
+          }
+        },
+        "required": ["message"]
+      },
+      "endpoint": {
+        "url": "https://httpbin.org/get",
+        "method": "GET",
+        "query": {
+          "message": "{{message}}"
+        },
+        "response_path": "$.args.message",
+        "timeout_secs": 10
+      }
+    },
+    {
+      "name": "post_test",
+      "description": "Test POST endpoint via httpbin",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": ["title"]
+      },
+      "endpoint": {
+        "url": "https://httpbin.org/post",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "title": "{{title}}",
+          "content": "{{content}}"
+        },
+        "response_path": "$.json.title",
+        "timeout_secs": 10
+      }
+    },
+    {
+      "name": "search_notes",
+      "description": "Search through user notes",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Search scope (user, system, all)"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "search_files",
+      "description": "Search through files",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Search scope"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "draft_email",
+      "description": "Draft an email",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "Recipient email address"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Email subject"
+          },
+          "body": {
+            "type": "string",
+            "description": "Email body"
+          }
+        },
+        "required": ["to", "subject"]
+      }
+    },
+    {
+      "name": "create_todo",
+      "description": "Create a todo/reminder item",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Todo title"
+          },
+          "due": {
+            "type": "string",
+            "description": "Due date in YYYY-MM-DD format"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority level (low, normal, high)"
+          }
+        },
+        "required": ["title"]
+      }
+    }
+  ]
+}

@@ -17,14 +17,24 @@ serde_json = "1.0"
 # CLI argument parsing
 clap = { version = "4.0", features = ["derive"] }
 
-# HTTP client for LLM API
+# HTTP client for LLM API and tool execution
 reqwest = { version = "0.11", features = ["blocking", "json"] }
+
+# Regex for template substitution
+regex = "1.10"
 
 # Error handling
 anyhow = "1.0"
 
 # Date/time handling
 chrono = "0.4"
+
+# JWT for Apple WeatherKit authentication
+jsonwebtoken = "9.3"
+base64 = "0.22"
+
+# Load environment variables from .env file
+dotenvy = "0.15"
 
 [features]
 default = ["swipl-backend"]

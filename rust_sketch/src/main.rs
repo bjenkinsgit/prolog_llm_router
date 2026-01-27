@@ -13,8 +13,10 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod apple_weather;
 mod derive_sketch;
 mod llm;
+mod tools;
 
 #[cfg(feature = "swipl-backend")]
 mod prolog;
@@ -60,6 +62,10 @@ struct Args {
     /// Path to router.pl file (use router_standard.pl for Scryer backend)
     #[arg(long = "router")]
     router_path: Option<PathBuf>,
+
+    /// Path to tools configuration JSON file for HTTP tool execution
+    #[arg(long = "tools")]
+    tools_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -543,8 +549,15 @@ pub fn prolog_decide_stub(payload: &IntentPayload) -> Decision {
                 }
             };
 
+            // Prefer Apple WeatherKit if configured, otherwise use OpenWeatherMap
+            let tool = if apple_weather::is_configured() {
+                "get_apple_weather"
+            } else {
+                "get_weather"
+            };
+
             Decision::Route {
-                tool: "get_weather".to_string(),
+                tool: tool.to_string(),
                 args: serde_json::json!({
                     "location": location,
                     "date": date
@@ -616,18 +629,61 @@ pub fn prolog_decide_stub(payload: &IntentPayload) -> Decision {
 }
 
 // ============================================================================
-// Stub Tool Runner
+// Tool Runner (with optional HTTP execution)
 // ============================================================================
 
-fn run_tool(tool: &str, args: &serde_json::Value) -> String {
+fn run_tool_stub(tool: &str, args: &serde_json::Value) -> String {
     match tool {
         "search_notes" => format!("[stub] searched notes for: {}", args),
         "search_files" => format!("[stub] searched files for: {}", args),
         "get_weather" => format!("[stub] weather result for: {}", args),
+        "get_apple_weather" => format!("[stub] apple weather result for: {}", args),
         "draft_email" => format!("[stub] drafted email with: {}", args),
         "create_todo" => format!("[stub] created todo with: {}", args),
         _ => format!("[stub] unknown tool: {} args={}", tool, args),
     }
+}
+
+fn run_tool(
+    tool: &str,
+    args: &serde_json::Value,
+    executor: Option<&tools::ToolExecutor>,
+) -> String {
+    // Special handling for Apple WeatherKit (requires JWT auth)
+    if tool == "get_apple_weather" {
+        if apple_weather::is_configured() {
+            let location = args["location"].as_str().unwrap_or("NYC");
+            let date = args["date"].as_str().unwrap_or("today");
+            match apple_weather::execute_apple_weather(location, date) {
+                Ok(result) => return result,
+                Err(e) => {
+                    eprintln!("WARNING: Apple Weather failed: {}", e);
+                    // Fall through to try OpenWeather or stub
+                }
+            }
+        } else {
+            eprintln!("DEBUG: Apple WeatherKit not configured, trying fallback");
+        }
+    }
+
+    // Try to execute via configured endpoint
+    if let Some(exec) = executor {
+        if exec.has_endpoint(tool) {
+            match exec.execute(tool, args) {
+                Ok(Some(result)) => return result,
+                Ok(None) => {
+                    // No endpoint configured, fall through to stub
+                }
+                Err(e) => {
+                    eprintln!("WARNING: Tool execution failed: {}", e);
+                    return format!("[error] {}: {}", tool, e);
+                }
+            }
+        }
+    }
+
+    // Fall back to stub
+    run_tool_stub(tool, args)
 }
 
 // ============================================================================
@@ -635,6 +691,9 @@ fn run_tool(tool: &str, args: &serde_json::Value) -> String {
 // ============================================================================
 
 fn main() -> Result<()> {
+    // Load environment variables from .env file (if present)
+    dotenvy::dotenv().ok();
+
     let args = Args::parse();
 
     // Determine router path based on backend if not specified
@@ -649,6 +708,26 @@ fn main() -> Result<()> {
             PathBuf::from("../router.pl")
         }
     });
+
+    // Load tool executor if config provided
+    let tool_executor = if let Some(ref tools_path) = args.tools_path {
+        eprintln!("DEBUG: Loading tools config from: {}", tools_path.display());
+        match tools::ToolExecutor::load(tools_path) {
+            Ok(exec) => {
+                eprintln!(
+                    "DEBUG: Loaded {} tool(s)",
+                    exec.all_tools().count()
+                );
+                Some(exec)
+            }
+            Err(e) => {
+                eprintln!("WARNING: Failed to load tools config: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Extract intent (stub or LLM)
     let mut payload = if args.use_llm {
@@ -742,7 +821,7 @@ fn main() -> Result<()> {
 
     // Run tool if routed
     if let Decision::Route { ref tool, ref args } = decision {
-        let result = run_tool(tool, args);
+        let result = run_tool(tool, args, tool_executor.as_ref());
         println!("\nTool Result:");
         println!("{}", result);
     }
