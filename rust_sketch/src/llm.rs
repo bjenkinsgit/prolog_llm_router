@@ -47,14 +47,16 @@ Rules:
 "#;
 
 /// Load the system prompt from file, with {{TODAY}} substitution
-fn load_system_prompt() -> String {
+fn load_system_prompt(verbose: bool) -> String {
     let today = Local::now().format("%Y-%m-%d").to_string();
 
     // Try to load from file
     let prompt = if Path::new(PROMPT_FILE).exists() {
         match fs::read_to_string(PROMPT_FILE) {
             Ok(content) => {
-                eprintln!("DEBUG: Loaded prompt from {}", PROMPT_FILE);
+                if verbose {
+                    eprintln!("DEBUG: Loaded prompt from {}", PROMPT_FILE);
+                }
                 content
             }
             Err(e) => {
@@ -63,7 +65,9 @@ fn load_system_prompt() -> String {
             }
         }
     } else {
-        eprintln!("DEBUG: Prompt file not found, using fallback");
+        if verbose {
+            eprintln!("DEBUG: Prompt file not found, using fallback");
+        }
         FALLBACK_PROMPT.to_string()
     };
 
@@ -91,6 +95,8 @@ pub struct LlmRequest {
     pub instructions: Option<String>,
     /// Previous response ID for conversation continuation
     pub previous_response_id: Option<String>,
+    /// Enable verbose debug output
+    pub verbose: bool,
 }
 
 /// Public LLM response
@@ -152,18 +158,21 @@ struct RawConstraints {
 }
 
 /// Extract intent from user text using LLM
-pub fn extract_intent_llm(user_text: &str) -> Result<IntentPayload> {
-    let system_prompt = load_system_prompt();
+pub fn extract_intent_llm(user_text: &str, verbose: bool) -> Result<IntentPayload> {
+    let system_prompt = load_system_prompt(verbose);
 
     let request = LlmRequest {
         input: format!("{}\n\nUSER:\n{}", system_prompt, user_text),
         instructions: None,
         previous_response_id: None,
+        verbose,
     };
 
     let response = call_llm(&request)?;
 
-    eprintln!("DEBUG: LLM raw response: {}", response.output_text);
+    if verbose {
+        eprintln!("DEBUG: LLM raw response: {}", response.output_text);
+    }
 
     // Parse JSON from text
     let raw = parse_json_from_text(&response.output_text)?;
@@ -183,7 +192,9 @@ pub fn call_llm(request: &LlmRequest) -> Result<LlmResponse> {
         previous_response_id: request.previous_response_id.clone(),
     };
 
-    eprintln!("DEBUG: Calling LLM at {}/responses", LLM_BASE_URL);
+    if request.verbose {
+        eprintln!("DEBUG: Calling LLM at {}/responses", LLM_BASE_URL);
+    }
 
     let response = client
         .post(format!("{}/responses", LLM_BASE_URL))

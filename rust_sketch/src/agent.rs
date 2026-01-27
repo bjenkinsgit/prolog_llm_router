@@ -194,7 +194,7 @@ Respond with JSON only:
 "#;
 
 /// Load the agent system prompt
-fn load_agent_prompt(tools: Option<&ToolExecutor>) -> String {
+fn load_agent_prompt(tools: Option<&ToolExecutor>, verbose: bool) -> String {
     use chrono::Local;
     use std::fs;
     use std::path::Path;
@@ -205,7 +205,9 @@ fn load_agent_prompt(tools: Option<&ToolExecutor>) -> String {
     let prompt = if Path::new(AGENT_PROMPT_FILE).exists() {
         match fs::read_to_string(AGENT_PROMPT_FILE) {
             Ok(content) => {
-                eprintln!("DEBUG: Loaded agent prompt from {}", AGENT_PROMPT_FILE);
+                if verbose {
+                    eprintln!("DEBUG: Loaded agent prompt from {}", AGENT_PROMPT_FILE);
+                }
                 content
             }
             Err(e) => {
@@ -217,7 +219,9 @@ fn load_agent_prompt(tools: Option<&ToolExecutor>) -> String {
             }
         }
     } else {
-        eprintln!("DEBUG: Agent prompt file not found, using fallback");
+        if verbose {
+            eprintln!("DEBUG: Agent prompt file not found, using fallback");
+        }
         FALLBACK_AGENT_PROMPT.to_string()
     };
 
@@ -325,6 +329,7 @@ fn parse_agent_action(text: &str) -> Result<AgentAction> {
 fn call_llm_for_action(
     state: &ConversationState,
     system_prompt: &str,
+    verbose: bool,
 ) -> Result<AgentAction> {
     let conversation = state.format_for_llm();
     let input = format!("{}\n\n{}", system_prompt, conversation);
@@ -335,11 +340,14 @@ fn call_llm_for_action(
         // Don't use previous_response_id - not all endpoints support it
         // and we're already passing the full conversation history
         previous_response_id: None,
+        verbose,
     };
 
     let response = call_llm(&request)?;
 
-    eprintln!("DEBUG: LLM response: {}", response.output_text);
+    if verbose {
+        eprintln!("DEBUG: LLM response: {}", response.output_text);
+    }
 
     parse_agent_action(&response.output_text)
 }
@@ -416,7 +424,7 @@ pub fn run_agent_loop(
     let mut state = ConversationState::new(config.max_turns);
     state.add_user_message(query);
 
-    let system_prompt = load_agent_prompt(executor);
+    let system_prompt = load_agent_prompt(executor, config.verbose);
 
     if config.verbose {
         eprintln!("DEBUG: Starting agent loop with max_turns={}", config.max_turns);
@@ -431,7 +439,7 @@ pub fn run_agent_loop(
             ));
         }
 
-        let action = call_llm_for_action(&state, &system_prompt)?;
+        let action = call_llm_for_action(&state, &system_prompt, config.verbose)?;
         state.turn_count += 1;
 
         if config.verbose {

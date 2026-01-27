@@ -76,6 +76,10 @@ struct Args {
     /// Maximum turns for agent mode before stopping
     #[arg(long = "max-turns", default_value = "10")]
     max_turns: u32,
+
+    /// Enable verbose debug output
+    #[arg(long, short = 'v')]
+    verbose: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -704,19 +708,21 @@ pub enum Decision {
 }
 
 /// Stub Prolog router - simulates router.pl decisions
-pub fn prolog_decide_stub(payload: &IntentPayload) -> Decision {
+pub fn prolog_decide_stub(payload: &IntentPayload, verbose: bool) -> Decision {
     let intent = &payload.intent;
     let entities = &payload.entities;
     let constraints = &payload.constraints;
 
     // Print the query that would be sent to Prolog
-    let query = format!(
-        "route({}, {}, {}, Tool, Args)",
-        intent.as_atom(),
-        entities.to_prolog_dict(),
-        constraints.to_prolog_dict()
-    );
-    eprintln!("DEBUG: Prolog query: {}", query);
+    if verbose {
+        let query = format!(
+            "route({}, {}, {}, Tool, Args)",
+            intent.as_atom(),
+            entities.to_prolog_dict(),
+            constraints.to_prolog_dict()
+        );
+        eprintln!("DEBUG: Prolog query: {}", query);
+    }
 
     // Simulate routing logic from router.pl
     match intent {
@@ -949,13 +955,14 @@ fn main() -> Result<()> {
 
     // Load tool executor if config provided
     let tool_executor = if let Some(ref tools_path) = args.tools_path {
-        eprintln!("DEBUG: Loading tools config from: {}", tools_path.display());
+        if args.verbose {
+            eprintln!("DEBUG: Loading tools config from: {}", tools_path.display());
+        }
         match tools::ToolExecutor::load(tools_path) {
             Ok(exec) => {
-                eprintln!(
-                    "DEBUG: Loaded {} tool(s)",
-                    exec.all_tools().count()
-                );
+                if args.verbose {
+                    eprintln!("DEBUG: Loaded {} tool(s)", exec.all_tools().count());
+                }
                 Some(exec)
             }
             Err(e) => {
@@ -969,10 +976,12 @@ fn main() -> Result<()> {
 
     // Agent mode: run agentic loop instead of single-shot
     if args.agent_mode {
-        eprintln!("DEBUG: Running in agent mode with max_turns={}", args.max_turns);
+        if args.verbose {
+            eprintln!("DEBUG: Running in agent mode with max_turns={}", args.max_turns);
+        }
         let config = agent::AgentConfig {
             max_turns: args.max_turns,
-            verbose: true,
+            verbose: args.verbose,
         };
         let answer = agent::run_agent_loop(&args.user_text, &config, tool_executor.as_ref())?;
         println!("{}", answer);
@@ -981,8 +990,10 @@ fn main() -> Result<()> {
 
     // Single-shot mode: extract intent (stub or LLM)
     let mut payload = if args.use_llm {
-        eprintln!("DEBUG: Using LLM intent extractor");
-        match llm::extract_intent_llm(&args.user_text) {
+        if args.verbose {
+            eprintln!("DEBUG: Using LLM intent extractor");
+        }
+        match llm::extract_intent_llm(&args.user_text, args.verbose) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("WARNING: LLM extraction failed ({}), using stub extractor", e);
@@ -1010,7 +1021,7 @@ fn main() -> Result<()> {
     // Resolve relative dates to absolute YYYY-MM-DD
     if let Some(ref date) = payload.entities.date {
         let resolved = resolve_relative_date(date);
-        if resolved != *date {
+        if resolved != *date && args.verbose {
             eprintln!("DEBUG: Resolved date '{}' -> '{}'", date, resolved);
         }
         payload.entities.date = Some(resolved);
@@ -1028,38 +1039,46 @@ fn main() -> Result<()> {
 
     // Route via Prolog (stub or real)
     let decision = if args.use_stub {
-        eprintln!("DEBUG: Using stub Prolog router");
-        prolog_decide_stub(&payload)
+        if args.verbose {
+            eprintln!("DEBUG: Using stub Prolog router");
+        }
+        prolog_decide_stub(&payload, args.verbose)
     } else {
         // Choose backend based on compiled features
         #[cfg(feature = "scryer-backend")]
         {
-            eprintln!("DEBUG: Using Scryer Prolog with router: {}", router_path.display());
+            if args.verbose {
+                eprintln!("DEBUG: Using Scryer Prolog with router: {}", router_path.display());
+            }
             match scryer::scryer_decide(&payload, &router_path) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("WARNING: Scryer error ({}), falling back to stub", e);
-                    prolog_decide_stub(&payload)
+                    prolog_decide_stub(&payload, args.verbose)
                 }
             }
         }
 
         #[cfg(all(feature = "swipl-backend", not(feature = "scryer-backend")))]
         {
-            eprintln!("DEBUG: Using SWI-Prolog with router: {}", router_path.display());
+            if args.verbose {
+                eprintln!("DEBUG: Using SWI-Prolog with router: {}", router_path.display());
+            }
             match prolog::prolog_decide_via_json(&payload, &router_path) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("WARNING: Prolog error ({}), falling back to stub", e);
-                    prolog_decide_stub(&payload)
+                    prolog_decide_stub(&payload, args.verbose)
                 }
             }
         }
 
         #[cfg(not(any(feature = "swipl-backend", feature = "scryer-backend")))]
         {
-            eprintln!("DEBUG: No Prolog backend compiled, using stub router");
-            prolog_decide_stub(&payload)
+            if args.verbose {
+                eprintln!("DEBUG: No Prolog backend compiled, using stub router");
+            }
+            prolog_decide_stub(&payload, args.verbose)
         }
     };
 
@@ -1180,7 +1199,7 @@ mod tests {
             },
         };
 
-        let decision = prolog_decide_stub(&payload);
+        let decision = prolog_decide_stub(&payload, false);
         match decision {
             Decision::Route { tool, args } => {
                 assert_eq!(tool, "search_notes");
@@ -1201,7 +1220,7 @@ mod tests {
             constraints: Constraints::default(),
         };
 
-        let decision = prolog_decide_stub(&payload);
+        let decision = prolog_decide_stub(&payload, false);
         match decision {
             Decision::NeedInfo { question } => {
                 assert!(question.contains("location"));

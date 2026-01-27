@@ -52,7 +52,7 @@ pub fn prolog_decide_via_json(payload: &IntentPayload, router_path: &Path) -> Re
             // Query succeeded - either route matched or an exception was caught
             // Since we can't easily extract variable bindings with swipl-rs,
             // we fall back to the stub router which has the same logic
-            Ok(crate::prolog_decide_stub(payload))
+            Ok(crate::prolog_decide_stub(payload, false))
         }
         Err(e) => {
             let err_str = format!("{:?}", e);
