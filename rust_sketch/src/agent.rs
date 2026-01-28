@@ -353,7 +353,7 @@ fn call_llm_for_action(
 }
 
 /// Execute a tool and return the result
-fn execute_tool(
+pub fn execute_tool(
     tool: &str,
     args: &Value,
     executor: Option<&ToolExecutor>,

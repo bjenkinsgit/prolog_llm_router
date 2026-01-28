@@ -35,8 +35,12 @@ mod scryer;
 #[command(name = "prolog-router")]
 #[command(about = "Route user intents to tools via Prolog rules")]
 struct Args {
-    /// User request in natural language
+    /// User request in natural language (or JSON args when using --tool)
     user_text: String,
+
+    /// Execute a tool directly by name (bypasses intent routing)
+    #[arg(long = "tool")]
+    tool_name: Option<String>,
 
     /// Optional date (e.g., today, tomorrow, 2026-02-10)
     #[arg(long)]
@@ -974,6 +978,61 @@ fn main() -> Result<()> {
     } else {
         None
     };
+
+    // Direct tool execution mode: bypass intent routing entirely
+    if let Some(ref tool_name) = args.tool_name {
+        if args.verbose {
+            eprintln!("DEBUG: Direct tool execution: {}", tool_name);
+        }
+
+        // Parse user_text as JSON args, or build args from CLI flags
+        let tool_args: serde_json::Value = if args.user_text.trim().starts_with('{') {
+            // User provided JSON directly
+            serde_json::from_str(&args.user_text).unwrap_or_else(|e| {
+                eprintln!("WARNING: Invalid JSON args: {}, using empty object", e);
+                serde_json::json!({})
+            })
+        } else {
+            // Build args from user_text and CLI flags
+            let mut obj = serde_json::Map::new();
+
+            // Use user_text as the primary argument (query, tag, id, etc.)
+            let text = args.user_text.trim();
+            if !text.is_empty() {
+                // Determine the arg name based on tool
+                let arg_name = match tool_name.as_str() {
+                    "search_notes" => "query",
+                    "notes_search_by_tag" => "tag",
+                    "get_note" | "open_note" => "id",
+                    "list_notes" => "folder",
+                    "notes_index" => "action",
+                    _ => "query", // default
+                };
+                obj.insert(arg_name.to_string(), serde_json::Value::String(text.to_string()));
+            }
+
+            // Also add CLI flags if provided
+            if let Some(ref date) = args.date {
+                obj.insert("date".to_string(), serde_json::Value::String(date.clone()));
+            }
+            if let Some(ref location) = args.location {
+                obj.insert("location".to_string(), serde_json::Value::String(location.clone()));
+            }
+
+            serde_json::Value::Object(obj)
+        };
+
+        if args.verbose {
+            eprintln!("DEBUG: Tool args: {}", tool_args);
+        }
+
+        let (success, result) = agent::execute_tool(tool_name, &tool_args, tool_executor.as_ref());
+        if !success {
+            eprintln!("Tool execution failed");
+        }
+        println!("{}", result);
+        return Ok(());
+    }
 
     // Agent mode: run agentic loop instead of single-shot
     if args.agent_mode {

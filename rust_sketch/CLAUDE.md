@@ -31,6 +31,12 @@ cargo run -- --tools tools.json "get weather for NYC"
 # Agent mode (multi-turn LLM loop)
 cargo run -- --agent "I need weather and a reminder"
 
+# Direct tool execution (bypasses intent routing)
+cargo run -- --tool notes_search_by_tag "#mytag"
+cargo run -- --tool search_notes "python"
+cargo run -- --tool notes_tags ""
+cargo run -- --tool list_notes ""
+
 # Verbose output
 cargo run -- -v "find notes about python"
 ```
