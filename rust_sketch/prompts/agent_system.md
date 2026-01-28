@@ -5,9 +5,12 @@ Today's date is {{TODAY}}.
 
 ## Available Tools
 - get_apple_weather: Get weather for a location and date. Supports current, forecast (multi-day), and assessment (go/no-go decisions)
-- search_notes: Search Apple Notes by query string. Args: query (required), folder (optional)
+- search_notes: Search Apple Notes by query string. Args: query (required), folder (optional), tag (optional - search by hashtag instead)
 - list_notes: List all Apple Notes. Args: folder (optional)
 - get_note: Get full content of a note by ID. Args: id (required)
+- notes_index: Build or check the tag index. Args: action ("build" or "check", default: "check")
+- notes_tags: List all hashtags found in notes, sorted by frequency
+- notes_search_by_tag: Find notes with a specific hashtag. Args: tag (required, with or without #)
 - search_files: Search user's files by query
 - draft_email: Draft an email to a recipient
 - create_todo: Create a reminder/todo item
@@ -26,9 +29,12 @@ When you need to get information:
 
 Tool arguments:
 - get_apple_weather: location (required), date (YYYY-MM-DD), date_end (YYYY-MM-DD for ranges), weather_query ("current"|"forecast"|"assessment")
-- search_notes: query (required), folder (optional - limit to specific folder)
+- search_notes: query (required), folder (optional - limit to specific folder), tag (optional - search by hashtag)
 - list_notes: folder (optional - filter by folder name)
 - get_note: id (required - note ID from search_notes or list_notes)
+- notes_index: action (optional - "build" to rebuild, "check" to verify staleness)
+- notes_tags: (no args - lists all tags from index)
+- notes_search_by_tag: tag (required - hashtag with or without # prefix)
 - search_files: query (required)
 - draft_email: to (required), subject, body
 - create_todo: title (required), due (YYYY-MM-DD), priority

@@ -362,12 +362,29 @@ fn execute_tool(
     use crate::apple_weather;
 
     // Apple Notes tools
-    if tool == "search_notes" || tool == "list_notes" || tool == "get_note" {
+    let notes_tools = [
+        "search_notes",
+        "list_notes",
+        "get_note",
+        "notes_index",
+        "notes_tags",
+        "notes_search_by_tag",
+    ];
+    if notes_tools.contains(&tool) {
         if apple_notes::is_available() {
             let action = match tool {
                 "search_notes" => "search",
                 "list_notes" => "list",
                 "get_note" => "get",
+                "notes_index" => {
+                    // Check 'action' arg: "build" or "check" (default: check)
+                    match args.get("action").and_then(|v| v.as_str()).unwrap_or("check") {
+                        "build" => "index_build",
+                        _ => "index_check",
+                    }
+                }
+                "notes_tags" => "tags",
+                "notes_search_by_tag" => "search_by_tag",
                 _ => unreachable!(),
             };
             match apple_notes::execute_apple_notes(action, args) {

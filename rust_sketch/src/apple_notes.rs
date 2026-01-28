@@ -2,13 +2,26 @@
 //!
 //! Provides search, list, and retrieval of Apple Notes using external AppleScript files.
 //! Uses a delimiter-based parsing protocol for reliable cross-language communication.
+//!
+//! Includes a tag indexing system that caches note metadata and extracted hashtags
+//! for fast tag-based queries without rescanning all notes.
 
 use anyhow::{anyhow, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 const SCRIPTS_DIR: &str = "scripts";
+
+/// Default path for the notes index cache file
+fn default_index_path() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("apple_notes_index.json")
+}
 
 // ============================================================================
 // Data Structures
@@ -36,6 +49,33 @@ pub struct NoteContent {
     pub body: String,
     /// Command to open this note in Notes.app
     pub open_cmd: String,
+}
+
+// ============================================================================
+// Tag Index Data Structures
+// ============================================================================
+
+/// Indexed note metadata (stored in cache)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedNote {
+    pub id: String,
+    pub title: String,
+    pub folder: String,
+    pub modified: String,
+    pub tags: Vec<String>,
+}
+
+/// The full notes index (persisted to disk)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotesIndex {
+    /// Number of notes when index was built (for staleness check)
+    pub note_count: usize,
+    /// ISO 8601 timestamp when index was last updated
+    pub last_updated: String,
+    /// Map from tag -> list of note IDs
+    pub tags: HashMap<String, Vec<String>>,
+    /// Map from note ID -> indexed note metadata
+    pub notes: HashMap<String, IndexedNote>,
 }
 
 // ============================================================================
@@ -245,6 +285,247 @@ pub fn get_note(note_id: &str) -> Result<String> {
 }
 
 // ============================================================================
+// Tag Index Functions
+// ============================================================================
+
+/// Load the notes index from disk
+pub fn load_index() -> Result<NotesIndex> {
+    let path = default_index_path();
+    if !path.exists() {
+        return Err(anyhow!("Index not found. Run 'notes_index' to build it."));
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|e| anyhow!("Failed to read index file: {}", e))?;
+
+    serde_json::from_str(&content)
+        .map_err(|e| anyhow!("Failed to parse index file: {}", e))
+}
+
+/// Save the notes index to disk
+fn save_index(index: &NotesIndex) -> Result<()> {
+    let path = default_index_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("Failed to create cache directory: {}", e))?;
+    }
+
+    let content = serde_json::to_string_pretty(index)
+        .map_err(|e| anyhow!("Failed to serialize index: {}", e))?;
+
+    fs::write(&path, content)
+        .map_err(|e| anyhow!("Failed to write index file: {}", e))?;
+
+    Ok(())
+}
+
+/// Get current note count from Notes.app (quick check)
+fn get_note_count() -> Result<usize> {
+    let output = run_script("notes_count.applescript", &[])?;
+
+    for line in output.lines() {
+        if let Some(count_str) = line.strip_prefix("COUNT: ") {
+            return count_str
+                .trim()
+                .parse()
+                .map_err(|e| anyhow!("Failed to parse note count: {}", e));
+        }
+        if line.starts_with("ERROR:") {
+            return Err(anyhow!("{}", line));
+        }
+    }
+
+    Err(anyhow!("Failed to get note count"))
+}
+
+/// Parse the output from notes_index_build.applescript
+fn parse_index_output(output: &str) -> Result<(usize, Vec<IndexedNote>)> {
+    let mut note_count = 0;
+    let mut notes = Vec::new();
+    let mut current: Option<IndexedNote> = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+
+        if let Some(count_str) = line.strip_prefix("NOTE_COUNT: ") {
+            note_count = count_str.trim().parse().unwrap_or(0);
+        } else if line == "RECORD_START" {
+            current = Some(IndexedNote {
+                id: String::new(),
+                title: String::new(),
+                folder: String::new(),
+                modified: String::new(),
+                tags: Vec::new(),
+            });
+        } else if line == "RECORD_END" {
+            if let Some(note) = current.take() {
+                notes.push(note);
+            }
+        } else if line.starts_with("ERROR:") {
+            return Err(anyhow!("{}", line));
+        } else if let Some(ref mut note) = current {
+            if let Some((key, value)) = line.split_once(": ") {
+                match key {
+                    "id" => note.id = value.to_string(),
+                    "title" => note.title = value.to_string(),
+                    "folder" => note.folder = value.to_string(),
+                    "modified" => note.modified = value.to_string(),
+                    "tags" => {
+                        note.tags = value
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok((note_count, notes))
+}
+
+/// Build or rebuild the notes index
+pub fn build_index() -> Result<String> {
+    let output = run_script("notes_index_build.applescript", &[])?;
+    let (note_count, notes) = parse_index_output(&output)?;
+
+    // Build tag -> note_ids map
+    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+    for note in &notes {
+        for tag in &note.tags {
+            tags.entry(tag.clone())
+                .or_default()
+                .push(note.id.clone());
+        }
+    }
+
+    // Build note_id -> note map
+    let notes_map: HashMap<String, IndexedNote> = notes
+        .into_iter()
+        .map(|n| (n.id.clone(), n))
+        .collect();
+
+    let index = NotesIndex {
+        note_count,
+        last_updated: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        tags,
+        notes: notes_map,
+    };
+
+    save_index(&index)?;
+
+    let tag_count = index.tags.len();
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "note_count": index.note_count,
+        "tag_count": tag_count,
+        "last_updated": index.last_updated,
+        "index_path": default_index_path().to_string_lossy()
+    }))?)
+}
+
+/// Check if the index is stale (note count changed)
+pub fn check_index() -> Result<String> {
+    let current_count = get_note_count()?;
+
+    match load_index() {
+        Ok(index) => {
+            let is_stale = current_count != index.note_count;
+            Ok(serde_json::to_string_pretty(&json!({
+                "success": true,
+                "index_exists": true,
+                "is_stale": is_stale,
+                "current_note_count": current_count,
+                "indexed_note_count": index.note_count,
+                "last_updated": index.last_updated,
+                "tag_count": index.tags.len()
+            }))?)
+        }
+        Err(_) => {
+            Ok(serde_json::to_string_pretty(&json!({
+                "success": true,
+                "index_exists": false,
+                "is_stale": true,
+                "current_note_count": current_count,
+                "message": "Index not found. Run notes_index with action 'build' to create it."
+            }))?)
+        }
+    }
+}
+
+/// List all tags from the index
+pub fn list_tags() -> Result<String> {
+    let index = load_index()?;
+
+    // Sort tags by count (descending), then alphabetically
+    let mut tag_list: Vec<(&String, usize)> = index
+        .tags
+        .iter()
+        .map(|(tag, ids)| (tag, ids.len()))
+        .collect();
+    tag_list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let tags: Vec<Value> = tag_list
+        .iter()
+        .map(|(tag, count)| {
+            json!({
+                "tag": tag,
+                "count": count
+            })
+        })
+        .collect();
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "tag_count": tags.len(),
+        "tags": tags
+    }))?)
+}
+
+/// Search notes by tag
+pub fn search_by_tag(tag: &str) -> Result<String> {
+    let index = load_index()?;
+
+    // Normalize tag (ensure it starts with #)
+    let normalized_tag = if tag.starts_with('#') {
+        tag.to_string()
+    } else {
+        format!("#{}", tag)
+    };
+
+    let note_ids = index.tags.get(&normalized_tag);
+
+    let notes: Vec<Value> = match note_ids {
+        Some(ids) => ids
+            .iter()
+            .filter_map(|id| index.notes.get(id))
+            .map(|note| {
+                json!({
+                    "id": note.id,
+                    "title": note.title,
+                    "folder": note.folder,
+                    "modified": note.modified,
+                    "tags": note.tags,
+                    "open_cmd": format!("osascript scripts/notes_open.applescript \"{}\"", note.id)
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "tag": normalized_tag,
+        "count": notes.len(),
+        "notes": notes
+    }))?)
+}
+
+// ============================================================================
 // Tool Executor Integration
 // ============================================================================
 
@@ -252,6 +533,10 @@ pub fn get_note(note_id: &str) -> Result<String> {
 pub fn execute_apple_notes(action: &str, args: &Value) -> Result<String> {
     match action {
         "search" => {
+            // Check if searching by tag
+            if let Some(tag) = args.get("tag").and_then(|v| v.as_str()) {
+                return search_by_tag(tag);
+            }
             let query = args["query"]
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing required 'query' argument"))?;
@@ -267,6 +552,16 @@ pub fn execute_apple_notes(action: &str, args: &Value) -> Result<String> {
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing required 'id' argument"))?;
             get_note(id)
+        }
+        // Tag index operations
+        "index_build" => build_index(),
+        "index_check" => check_index(),
+        "tags" => list_tags(),
+        "search_by_tag" => {
+            let tag = args["tag"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing required 'tag' argument"))?;
+            search_by_tag(tag)
         }
         _ => Err(anyhow!("Unknown Apple Notes action: {}", action)),
     }

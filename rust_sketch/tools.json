@@ -158,6 +158,44 @@
       }
     },
     {
+      "name": "notes_index",
+      "description": "Build or check the Apple Notes tag index. Use action='build' to rebuild, action='check' to verify if index is current.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["build", "check"],
+            "description": "Action to perform: 'build' rebuilds the index, 'check' verifies if it's current"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "notes_tags",
+      "description": "List all hashtags found in Apple Notes, sorted by frequency",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "notes_search_by_tag",
+      "description": "Find all Apple Notes with a specific hashtag",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "The hashtag to search for (with or without # prefix)"
+          }
+        },
+        "required": ["tag"]
+      }
+    },
+    {
       "name": "search_files",
       "description": "Search through files",
       "parameters": {
