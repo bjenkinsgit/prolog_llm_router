@@ -35,9 +35,11 @@ on run argv
         end tell
 
         -- Press Return to open the selected note in the editor
-        delay 0.2
+        delay 0.3
         tell application "System Events"
             tell process "Notes"
+                set frontmost to true
+                delay 0.2
                 key code 36 -- Return key
             end tell
         end tell

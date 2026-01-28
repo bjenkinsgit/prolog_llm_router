@@ -158,6 +158,20 @@
       }
     },
     {
+      "name": "open_note",
+      "description": "Open an Apple Note in the Notes app by ID. Use this when the user wants to view or edit a note directly.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The unique note ID (from search_notes or list_notes)"
+          }
+        },
+        "required": ["id"]
+      }
+    },
+    {
       "name": "notes_index",
       "description": "Build or check the Apple Notes tag index. Use action='build' to rebuild, action='check' to verify if index is current.",
       "parameters": {

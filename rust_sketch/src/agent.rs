@@ -366,6 +366,7 @@ fn execute_tool(
         "search_notes",
         "list_notes",
         "get_note",
+        "open_note",
         "notes_index",
         "notes_tags",
         "notes_search_by_tag",
@@ -376,6 +377,7 @@ fn execute_tool(
                 "search_notes" => "search",
                 "list_notes" => "list",
                 "get_note" => "get",
+                "open_note" => "open",
                 "notes_index" => {
                     // Check 'action' arg: "build" or "check" (default: check)
                     match args.get("action").and_then(|v| v.as_str()).unwrap_or("check") {

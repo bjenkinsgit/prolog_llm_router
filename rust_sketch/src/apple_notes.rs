@@ -284,6 +284,28 @@ pub fn get_note(note_id: &str) -> Result<String> {
     }))?)
 }
 
+/// Open a note in Notes.app by ID
+pub fn open_note(note_id: &str) -> Result<String> {
+    let output = run_script("notes_open.applescript", &[note_id])?;
+
+    // Parse the result - expects "OK: Opened note: <title>" or "ERROR: <message>"
+    let output = output.trim();
+    if output.starts_with("ERROR:") {
+        return Err(anyhow!("{}", output));
+    }
+
+    // Extract note title from success message
+    let title = output
+        .strip_prefix("OK: Opened note: ")
+        .unwrap_or("Unknown");
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "message": format!("Opened note '{}' in Notes.app", title),
+        "note_id": note_id
+    }))?)
+}
+
 // ============================================================================
 // Tag Index Functions
 // ============================================================================
@@ -566,6 +588,12 @@ pub fn execute_apple_notes(action: &str, args: &Value) -> Result<String> {
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing required 'id' argument"))?;
             get_note(id)
+        }
+        "open" => {
+            let id = args["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing required 'id' argument"))?;
+            open_note(id)
         }
         // Tag index operations
         "index_build" => build_index(),
