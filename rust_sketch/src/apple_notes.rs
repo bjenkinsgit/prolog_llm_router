@@ -340,6 +340,20 @@ fn get_note_count() -> Result<usize> {
     Err(anyhow!("Failed to get note count"))
 }
 
+/// Check if a tag is a CSS hex color code (e.g., #fff, #ffffff, #rrggbbaa)
+fn is_css_color_code(tag: &str) -> bool {
+    let tag = tag.strip_prefix('#').unwrap_or(tag);
+    let len = tag.len();
+
+    // CSS color codes are 3, 6, or 8 hex digits
+    if len != 3 && len != 6 && len != 8 {
+        return false;
+    }
+
+    // All characters must be hex digits
+    tag.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Parse the output from notes_index_build.applescript
 fn parse_index_output(output: &str) -> Result<(usize, Vec<IndexedNote>)> {
     let mut note_count = 0;
@@ -376,7 +390,7 @@ fn parse_index_output(output: &str) -> Result<(usize, Vec<IndexedNote>)> {
                         note.tags = value
                             .split(',')
                             .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
+                            .filter(|s| !s.is_empty() && !is_css_color_code(s))
                             .collect();
                     }
                     _ => {}
@@ -664,5 +678,57 @@ BODY_END"#;
         // This test just ensures the function runs without panicking
         // Actual availability depends on whether scripts exist
         let _ = is_available();
+    }
+
+    #[test]
+    fn test_is_css_color_code() {
+        // 3-digit hex colors
+        assert!(is_css_color_code("#fff"));
+        assert!(is_css_color_code("#FFF"));
+        assert!(is_css_color_code("#abc"));
+        assert!(is_css_color_code("#123"));
+
+        // 6-digit hex colors
+        assert!(is_css_color_code("#ffffff"));
+        assert!(is_css_color_code("#FFFFFF"));
+        assert!(is_css_color_code("#dee2e6"));
+        assert!(is_css_color_code("#e9ecef"));
+        assert!(is_css_color_code("#000000"));
+
+        // 8-digit hex colors (with alpha)
+        assert!(is_css_color_code("#ffffffff"));
+        assert!(is_css_color_code("#00000080"));
+
+        // Not color codes - real tags
+        assert!(!is_css_color_code("#project"));
+        assert!(!is_css_color_code("#todo"));
+        assert!(!is_css_color_code("#work"));
+        assert!(!is_css_color_code("#meeting-notes"));
+
+        // Edge cases
+        assert!(!is_css_color_code("#ff")); // Too short
+        assert!(!is_css_color_code("#ffff")); // 4 digits - not valid
+        assert!(!is_css_color_code("#fffff")); // 5 digits - not valid
+        assert!(!is_css_color_code("#fffffff")); // 7 digits - not valid
+        assert!(!is_css_color_code("#fffffffff")); // 9 digits - too long
+        assert!(!is_css_color_code("#ghijkl")); // Not hex
+    }
+
+    #[test]
+    fn test_parse_index_filters_color_codes() {
+        let output = r#"NOTE_COUNT: 1
+RECORD_START
+id: note-1
+title: Test Note
+folder: Notes
+modified: 2026-01-27T10:00:00Z
+tags: #project,#fff,#work,#dee2e6,#todo
+RECORD_END"#;
+
+        let (count, notes) = parse_index_output(output).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(notes.len(), 1);
+        // Should filter out #fff and #dee2e6
+        assert_eq!(notes[0].tags, vec!["#project", "#work", "#todo"]);
     }
 }
