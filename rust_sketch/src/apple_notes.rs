@@ -7,6 +7,7 @@
 //! for fast tag-based queries without rescanning all notes.
 
 use anyhow::{anyhow, Result};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -424,26 +425,123 @@ fn parse_index_output(output: &str) -> Result<(usize, Vec<IndexedNote>)> {
     Ok((note_count, notes))
 }
 
-/// Build or rebuild the notes index
-pub fn build_index() -> Result<String> {
-    let output = run_script("notes_index_build.applescript", &[])?;
-    let (note_count, notes) = parse_index_output(&output)?;
+// ============================================================================
+// SQLite Database Access (for native Apple Notes tags)
+// ============================================================================
 
-    // Build tag -> note_ids map
-    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
-    for note in &notes {
-        for tag in &note.tags {
-            tags.entry(tag.clone())
-                .or_default()
-                .push(note.id.clone());
-        }
+/// Get the path to the Apple Notes SQLite database
+fn notes_database_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join("Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
+    })
+}
+
+/// Note with tags from SQLite database
+#[derive(Debug)]
+struct NoteWithTags {
+    identifier: String,
+    title: String,
+    folder: String,
+    modified: String,
+    tags: Vec<String>,
+}
+
+/// Query notes and their native tags directly from Apple Notes SQLite database
+fn query_notes_with_tags_from_db() -> Result<Vec<NoteWithTags>> {
+    let db_path = notes_database_path()
+        .ok_or_else(|| anyhow!("Could not determine Notes database path"))?;
+
+    if !db_path.exists() {
+        return Err(anyhow!("Notes database not found at {:?}", db_path));
     }
 
-    // Build note_id -> note map
-    let notes_map: HashMap<String, IndexedNote> = notes
-        .into_iter()
-        .map(|n| (n.id.clone(), n))
-        .collect();
+    let conn = Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+
+    // Get the store UUID from Z_METADATA for constructing x-coredata IDs
+    let store_uuid: String = conn.query_row(
+        "SELECT Z_UUID FROM Z_METADATA LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Query notes with their tags using inline attachments
+    // Z_ENT = 12 is ICNote, Z_ENT = 9 is ICInlineAttachment
+    // Construct x-coredata ID format: x-coredata://STORE_UUID/ICNote/pNN
+    let mut stmt = conn.prepare(
+        "SELECT
+            'x-coredata://' || ? || '/ICNote/p' || n.Z_PK as note_id,
+            n.ZTITLE1,
+            COALESCE(f.ZTITLE2, 'Notes') as folder,
+            datetime(n.ZMODIFICATIONDATE1 + 978307200, 'unixepoch') as modified,
+            GROUP_CONCAT(DISTINCT '#' || LOWER(ia.ZTOKENCONTENTIDENTIFIER)) as tags
+        FROM ZICCLOUDSYNCINGOBJECT n
+        LEFT JOIN ZICCLOUDSYNCINGOBJECT f ON n.ZFOLDER = f.Z_PK
+        LEFT JOIN ZICCLOUDSYNCINGOBJECT ia ON ia.ZNOTE1 = n.Z_PK
+            AND ia.Z_ENT = 9
+            AND ia.ZTYPEUTI1 = 'com.apple.notes.inlinetextattachment.hashtag'
+        WHERE n.Z_ENT = 12
+            AND n.ZMARKEDFORDELETION != 1
+        GROUP BY n.Z_PK"
+    )?;
+
+    let notes = stmt.query_map([&store_uuid], |row| {
+        let tags_str: Option<String> = row.get(4)?;
+        let tags = tags_str
+            .map(|s| s.split(',').map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+
+        Ok(NoteWithTags {
+            identifier: row.get(0)?,
+            title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            folder: row.get(2)?,
+            modified: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            tags,
+        })
+    })?;
+
+    notes.collect::<Result<Vec<_>, _>>().map_err(|e| anyhow!("Database query error: {}", e))
+}
+
+/// Build or rebuild the notes index
+pub fn build_index() -> Result<String> {
+    eprint!("Reading Notes database... ");
+    let db_notes = query_notes_with_tags_from_db()?;
+    let note_count = db_notes.len();
+    eprintln!("{} notes found", note_count);
+
+    eprint!("Building tag index... ");
+    // Build tag -> note_ids map
+    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+    let mut notes_map: HashMap<String, IndexedNote> = HashMap::new();
+
+    for note in db_notes {
+        // Build the note ID in x-coredata format for compatibility
+        // The identifier from SQLite is a UUID, we need to look it up for open commands
+        let note_id = note.identifier.clone();
+
+        for tag in &note.tags {
+            if !tag.is_empty() {
+                tags.entry(tag.clone())
+                    .or_default()
+                    .push(note_id.clone());
+            }
+        }
+
+        notes_map.insert(
+            note_id.clone(),
+            IndexedNote {
+                id: note_id,
+                title: note.title,
+                folder: note.folder,
+                modified: note.modified,
+                tags: note.tags,
+            },
+        );
+    }
+    eprintln!("{} tags found", tags.len());
 
     let index = NotesIndex {
         note_count,
@@ -452,7 +550,9 @@ pub fn build_index() -> Result<String> {
         notes: notes_map,
     };
 
+    eprint!("Saving index... ");
     save_index(&index)?;
+    eprintln!("done");
 
     let tag_count = index.tags.len();
     Ok(serde_json::to_string_pretty(&json!({

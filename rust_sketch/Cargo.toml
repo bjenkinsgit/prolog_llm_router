@@ -42,6 +42,9 @@ urlencoding = "2.1"
 # Platform-specific directories (cache, config, etc.)
 dirs = "5.0"
 
+# SQLite for reading Apple Notes database directly
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [features]
 default = ["swipl-backend"]
 swipl-backend = ["swipl"]      # Use SWI-Prolog (requires external install)
