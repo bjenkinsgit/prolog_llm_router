@@ -42,10 +42,21 @@ urlencoding = "2.1"
 # Platform-specific directories (cache, config, etc.)
 dirs = "5.0"
 
+# TOML config parsing
+toml = "0.8"
+
 # SQLite for reading Apple Notes database directly
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Memvid - semantic search with QR-encoded video storage
+# Requires FFmpeg to be installed on the system (brew install ffmpeg)
+memvid-rs = { version = "1.2", optional = true }
+
+# Async runtime for memvid operations
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = ["swipl-backend"]
 swipl-backend = ["swipl"]      # Use SWI-Prolog (requires external install)
 scryer-backend = ["scryer-prolog"]  # Use Scryer Prolog (pure Rust)
+memvid = ["memvid-rs"]         # Semantic Notes search (requires FFmpeg)

@@ -1,0 +1,44 @@
+# Memvid Notes Configuration
+# Edit these values at runtime - no recompilation needed
+
+[chunking]
+# Size of text chunks in characters
+# QR version 40 with Level L has ~852 alphanumeric capacity
+# After gzip+base64, text can grow ~33%, so use ~400 to be safe
+# Plus ~10 char index prefix = ~410 input -> ~550 after base64
+chunk_size = 700
+
+# Overlap between chunks in characters
+# Helps preserve context across chunk boundaries
+overlap = 100
+
+[ml]
+# Device for BERT embeddings: "cpu", "metal", "cuda"
+device = "metal"
+
+[qr]
+# Error correction level: "low", "medium", "quartile", "high"
+# Lower = more data capacity, higher = more redundancy
+error_correction = "low"
+
+# QR code version (1-40). Version 40 has maximum capacity (~2950 bytes at low EC)
+# Set to 40 for maximum text capacity per QR code
+version = 40
+
+# Disable compression - base64 encoding can make small chunks larger
+enable_compression = false
+
+# Compression threshold in bytes - compress chunks larger than this
+compression_threshold = 100
+
+[metadata]
+# Strategy for embedding note metadata in chunks:
+# "inline" - Full metadata in text (old approach, limited capacity)
+# "indexed" - Short numeric reference, lookup from separate file
+strategy = "indexed"
+
+[cache]
+# Cache fetched note contents to disk for faster iteration
+# When enabled, notes are only fetched from AppleScript on first run
+# Subsequent runs use cached content (much faster for tuning parameters)
+enable_notes_cache = true

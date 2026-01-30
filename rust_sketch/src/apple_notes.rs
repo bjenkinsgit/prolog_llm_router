@@ -41,7 +41,7 @@ pub struct NoteRecord {
 }
 
 /// Full note content (includes body)
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteContent {
     pub id: String,
     pub title: String,
@@ -364,6 +364,7 @@ fn get_note_count() -> Result<usize> {
 }
 
 /// Check if a tag is a CSS hex color code (e.g., #fff, #ffffff, #rrggbbaa)
+#[allow(dead_code)]
 fn is_css_color_code(tag: &str) -> bool {
     let tag = tag.strip_prefix('#').unwrap_or(tag);
     let len = tag.len();
@@ -378,6 +379,7 @@ fn is_css_color_code(tag: &str) -> bool {
 }
 
 /// Parse the output from notes_index_build.applescript
+#[allow(dead_code)]
 fn parse_index_output(output: &str) -> Result<(usize, Vec<IndexedNote>)> {
     let mut note_count = 0;
     let mut notes = Vec::new();
@@ -704,6 +706,22 @@ pub fn execute_apple_notes(action: &str, args: &Value) -> Result<String> {
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing required 'tag' argument"))?;
             search_by_tag(tag)
+        }
+        // Semantic search operations (memvid-powered)
+        "semantic_search" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing required 'query' argument"))?;
+            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            crate::memvid_notes::search_json(query, top_k)
+        }
+        "rebuild_memvid_index" => crate::memvid_notes::rebuild_index_json(),
+        "memvid_stats" => crate::memvid_notes::stats_json(),
+        "smart_search" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing required 'query' argument"))?;
+            crate::memvid_notes::smart_search(query)
         }
         _ => Err(anyhow!("Unknown Apple Notes action: {}", action)),
     }

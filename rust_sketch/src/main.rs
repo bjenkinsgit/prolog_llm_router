@@ -19,6 +19,7 @@ mod apple_notes;
 mod apple_weather;
 mod derive_sketch;
 mod llm;
+mod memvid_notes;
 mod tools;
 
 #[cfg(feature = "swipl-backend")]
