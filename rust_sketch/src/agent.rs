@@ -96,6 +96,7 @@ impl Message {
 
 /// Tracks conversation state across turns
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ConversationState {
     pub messages: Vec<Message>,
     pub response_id: Option<String>,
@@ -370,11 +371,17 @@ pub fn execute_tool(
         "notes_index",
         "notes_tags",
         "notes_search_by_tag",
+        // Memvid-powered semantic search
+        "notes_semantic_search",
+        "notes_rebuild_index",
+        "notes_index_stats",
+        "notes_smart_search",
     ];
     if notes_tools.contains(&tool) {
         if apple_notes::is_available() {
             let action = match tool {
-                "search_notes" => "search",
+                // Redirect search_notes to smart_search (uses semantic if index exists)
+                "search_notes" => "smart_search",
                 "list_notes" => "list",
                 "get_note" => "get",
                 "open_note" => "open",
@@ -387,6 +394,11 @@ pub fn execute_tool(
                 }
                 "notes_tags" => "tags",
                 "notes_search_by_tag" => "search_by_tag",
+                // Memvid-powered semantic search
+                "notes_semantic_search" => "semantic_search",
+                "notes_rebuild_index" => "rebuild_memvid_index",
+                "notes_index_stats" => "memvid_stats",
+                "notes_smart_search" => "smart_search",
                 _ => unreachable!(),
             };
             match apple_notes::execute_apple_notes(action, args) {
