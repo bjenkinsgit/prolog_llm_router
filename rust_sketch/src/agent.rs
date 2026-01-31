@@ -2,6 +2,11 @@
 //!
 //! Transforms the single-shot intent→tool→output flow into an agentic loop:
 //! user_query → [LOOP: LLM decides action → execute tool → feed result back] → final answer
+//!
+//! With conversation memory enabled (memvid feature), the agent:
+//! 1. Searches past conversations for relevant context
+//! 2. Injects retrieved context into the system prompt
+//! 3. Stores the user query and final answer for future retrieval
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -9,6 +14,11 @@ use serde_json::Value;
 
 use crate::llm::{call_llm, LlmRequest};
 use crate::tools::ToolExecutor;
+use crate::conversation_memory::{
+    self, ConversationMemory,
+    load_memory_config, generate_session_id, format_memory_context,
+    load_or_create_sync, append_exchange_sync, search_sync,
+};
 
 // ============================================================================
 // Agent Configuration
@@ -21,6 +31,8 @@ pub struct AgentConfig {
     pub max_turns: u32,
     /// Whether to print verbose debug output
     pub verbose: bool,
+    /// Whether to use conversation memory
+    pub use_memory: bool,
 }
 
 impl Default for AgentConfig {
@@ -28,6 +40,7 @@ impl Default for AgentConfig {
         Self {
             max_turns: 10,
             verbose: false,
+            use_memory: true,
         }
     }
 }
@@ -194,8 +207,12 @@ Respond with JSON only:
 - Be concise but informative
 "#;
 
-/// Load the agent system prompt
-fn load_agent_prompt(tools: Option<&ToolExecutor>, verbose: bool) -> String {
+/// Load the agent system prompt with optional memory context
+fn load_agent_prompt(
+    tools: Option<&ToolExecutor>,
+    memory_context: Option<&str>,
+    verbose: bool
+) -> String {
     use chrono::Local;
     use std::fs;
     use std::path::Path;
@@ -250,6 +267,13 @@ fn load_agent_prompt(tools: Option<&ToolExecutor>, verbose: bool) -> String {
                     prompt = format!("{}{}{}", &prompt[..start], tools_section, &prompt[end..]);
                 }
             }
+        }
+    }
+
+    // Inject memory context if provided
+    if let Some(context) = memory_context {
+        if !context.is_empty() {
+            prompt.push_str(context);
         }
     }
 
@@ -362,6 +386,28 @@ pub fn execute_tool(
     use crate::apple_notes;
     use crate::apple_weather;
 
+    // Conversation memory tools
+    let memory_tools = ["memory_search", "memory_stats"];
+    if memory_tools.contains(&tool) {
+        return match tool {
+            "memory_search" => {
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+                match conversation_memory::search_json(query, top_k) {
+                    Ok(result) => (true, result),
+                    Err(e) => (false, format!("Memory search error: {}", e)),
+                }
+            }
+            "memory_stats" => {
+                match conversation_memory::stats_json() {
+                    Ok(result) => (true, result),
+                    Err(e) => (false, format!("Memory stats error: {}", e)),
+                }
+            }
+            _ => unreachable!(),
+        };
+    }
+
     // Apple Notes tools
     let notes_tools = [
         "search_notes",
@@ -467,6 +513,11 @@ pub fn execute_tool(
 ///
 /// Transforms user query into a series of LLM → tool → LLM interactions
 /// until the agent provides a final answer or reaches max turns.
+///
+/// With conversation memory enabled:
+/// 1. Searches past conversations for relevant context
+/// 2. Injects retrieved context into the system prompt
+/// 3. Stores the user query and final answer for future retrieval
 pub fn run_agent_loop(
     query: &str,
     config: &AgentConfig,
@@ -475,19 +526,73 @@ pub fn run_agent_loop(
     let mut state = ConversationState::new(config.max_turns);
     state.add_user_message(query);
 
-    let system_prompt = load_agent_prompt(executor, config.verbose);
+    // Load memory config and optionally search for relevant context
+    let memory_config = load_memory_config();
+    let use_memory = config.use_memory && memory_config.enabled;
+
+    let (memory_context, memory, session_id) = if use_memory {
+        if config.verbose {
+            eprintln!("DEBUG: Loading conversation memory...");
+        }
+
+        match load_or_create_sync() {
+            Ok(mut mem) => {
+                // Search for relevant past conversations
+                let context = if ConversationMemory::exists() {
+                    match search_sync(&mut mem, query, memory_config.max_context_results) {
+                        Ok(results) => {
+                            if config.verbose {
+                                eprintln!("DEBUG: Found {} relevant past conversations", results.len());
+                            }
+                            format_memory_context(&results)
+                        }
+                        Err(e) => {
+                            if config.verbose {
+                                eprintln!("DEBUG: Memory search failed: {}", e);
+                            }
+                            String::new()
+                        }
+                    }
+                } else {
+                    if config.verbose {
+                        eprintln!("DEBUG: No conversation memory exists yet");
+                    }
+                    String::new()
+                };
+
+                let session_id = generate_session_id();
+                if config.verbose {
+                    eprintln!("DEBUG: Session ID: {}", session_id);
+                }
+
+                (Some(context), Some(mem), Some(session_id))
+            }
+            Err(e) => {
+                eprintln!("WARNING: Failed to load conversation memory: {}", e);
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let system_prompt = load_agent_prompt(
+        executor,
+        memory_context.as_deref(),
+        config.verbose
+    );
 
     if config.verbose {
         eprintln!("DEBUG: Starting agent loop with max_turns={}", config.max_turns);
     }
 
-    loop {
+    let final_answer = loop {
         if state.turn_count >= state.max_turns {
-            return Ok(format!(
+            break format!(
                 "Max turns ({}) reached. Last context: {}",
                 state.max_turns,
                 state.messages.last().map(|m| &m.content[..]).unwrap_or("")
-            ));
+            );
         }
 
         let action = call_llm_for_action(&state, &system_prompt, config.verbose)?;
@@ -499,11 +604,11 @@ pub fn run_agent_loop(
 
         match action {
             AgentAction::FinalAnswer { answer } => {
-                return Ok(answer);
+                break answer;
             }
 
             AgentAction::AskUser { question } => {
-                return Ok(format!("Need more information: {}", question));
+                break format!("Need more information: {}", question);
             }
 
             AgentAction::CallTool { tool, args } => {
@@ -535,7 +640,22 @@ pub fn run_agent_loop(
                 ));
             }
         }
+    };
+
+    // Store the exchange in memory
+    if let (Some(ref mut mem), Some(ref sid)) = (memory, session_id) {
+        if config.verbose {
+            eprintln!("DEBUG: Storing conversation in memory...");
+        }
+
+        if let Err(e) = append_exchange_sync(mem, sid, query, &final_answer) {
+            eprintln!("WARNING: Failed to store conversation in memory: {}", e);
+        } else if config.verbose {
+            eprintln!("DEBUG: Conversation stored successfully");
+        }
     }
+
+    Ok(final_answer)
 }
 
 // ============================================================================

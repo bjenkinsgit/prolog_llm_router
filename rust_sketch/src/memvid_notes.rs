@@ -26,6 +26,46 @@ use memvid_rs::{Config, MemvidEncoder, MemvidRetriever};
 #[cfg(feature = "memvid")]
 use memvid_rs::config::ErrorCorrectionLevel;
 
+/// Convert string log level to ffmpeg_next::log::Level
+#[cfg(feature = "memvid")]
+fn parse_ffmpeg_log_level(level: &str) -> ffmpeg_next::log::Level {
+    match level.to_lowercase().as_str() {
+        "quiet" => ffmpeg_next::log::Level::Quiet,
+        "panic" => ffmpeg_next::log::Level::Panic,
+        "fatal" => ffmpeg_next::log::Level::Fatal,
+        "error" => ffmpeg_next::log::Level::Error,
+        "warning" => ffmpeg_next::log::Level::Warning,
+        "info" => ffmpeg_next::log::Level::Info,
+        "verbose" => ffmpeg_next::log::Level::Verbose,
+        "debug" => ffmpeg_next::log::Level::Debug,
+        "trace" => ffmpeg_next::log::Level::Trace,
+        _ => ffmpeg_next::log::Level::Error, // Default to error
+    }
+}
+
+/// Initialize FFmpeg with configurable log verbosity
+#[cfg(feature = "memvid")]
+fn init_ffmpeg_quiet() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let config = load_config();
+        ffmpeg_next::init().ok();
+        let level = parse_ffmpeg_log_level(&config.ffmpeg.library_log_level);
+        ffmpeg_next::log::set_level(level);
+    });
+}
+
+/// Get the FFmpeg config (for use by other modules)
+pub fn get_ffmpeg_config() -> FfmpegConfig {
+    load_config().ffmpeg
+}
+
+/// Get the full memvid config (for use by other modules)
+pub fn get_full_config() -> MemvidConfig {
+    load_config()
+}
+
 #[allow(unused_imports)]
 use crate::apple_notes::{self, NoteContent};
 
@@ -49,6 +89,41 @@ pub struct MemvidConfig {
     pub metadata: MetadataConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub ffmpeg: FfmpegConfig,
+}
+
+/// FFmpeg logging configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct FfmpegConfig {
+    /// FFmpeg library log level (swscaler, etc.)
+    #[serde(default = "default_library_log_level")]
+    pub library_log_level: String,
+    /// FFmpeg CLI log level
+    #[serde(default = "default_cli_log_level")]
+    pub cli_log_level: String,
+    /// Hide FFmpeg CLI banner
+    #[serde(default = "default_hide_banner")]
+    pub hide_banner: bool,
+    /// x265 encoder log level
+    #[serde(default = "default_x265_log_level")]
+    pub x265_log_level: String,
+}
+
+fn default_library_log_level() -> String { "error".to_string() }
+fn default_cli_log_level() -> String { "error".to_string() }
+fn default_hide_banner() -> bool { true }
+fn default_x265_log_level() -> String { "error".to_string() }
+
+impl Default for FfmpegConfig {
+    fn default() -> Self {
+        Self {
+            library_log_level: default_library_log_level(),
+            cli_log_level: default_cli_log_level(),
+            hide_banner: default_hide_banner(),
+            x265_log_level: default_x265_log_level(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +211,7 @@ impl Default for MemvidConfig {
             qr: QrConfig::default(),
             metadata: MetadataConfig::default(),
             cache: CacheConfig::default(),
+            ffmpeg: FfmpegConfig::default(),
         }
     }
 }
@@ -149,10 +225,9 @@ fn load_config() -> MemvidConfig {
     if config_path.exists() {
         if let Ok(content) = fs::read_to_string(&config_path) {
             if let Ok(config) = toml::from_str(&content) {
-                eprintln!("Loaded config from {:?}", config_path);
                 return config;
             } else {
-                eprintln!("Warning: Failed to parse config, using defaults");
+                eprintln!("Warning: Failed to parse memvid_config.toml, using defaults");
             }
         }
     }
@@ -500,6 +575,9 @@ fn fetch_notes_batch(note_ids: &[String]) -> Result<std::collections::HashMap<St
 /// then encodes them into a searchable video file with semantic embeddings.
 #[cfg(feature = "memvid")]
 pub async fn build_index() -> Result<IndexStats> {
+    // Suppress FFmpeg swscaler warnings
+    init_ffmpeg_quiet();
+
     ensure_cache_dir()?;
 
     // Load runtime config
@@ -849,6 +927,9 @@ fn create_snippet(text: &str, max_len: usize) -> String {
 /// Returns notes ranked by semantic similarity to the query.
 #[cfg(feature = "memvid")]
 pub async fn search(query: &str, top_k: usize) -> Result<Vec<NotesSearchResult>> {
+    // Suppress FFmpeg swscaler warnings
+    init_ffmpeg_quiet();
+
     let vpath = video_path();
     let ipath = index_path();
 

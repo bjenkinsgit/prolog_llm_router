@@ -50,7 +50,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Memvid - semantic search with QR-encoded video storage
 # Requires FFmpeg to be installed on the system (brew install ffmpeg)
-memvid-rs = { version = "1.2", optional = true }
+# Using local path for development (includes GPU auto-detect fix)
+memvid-rs = { path = "/Users/bwj/src/ai/memvid-rs", optional = true }
+
+# FFmpeg bindings for log level control (suppress swscaler warnings)
+ffmpeg-next = { version = "7.1", optional = true }
 
 # Async runtime for memvid operations
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -59,4 +63,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 default = ["swipl-backend"]
 swipl-backend = ["swipl"]      # Use SWI-Prolog (requires external install)
 scryer-backend = ["scryer-prolog"]  # Use Scryer Prolog (pure Rust)
-memvid = ["memvid-rs"]         # Semantic Notes search (requires FFmpeg)
+memvid = ["memvid-rs", "ffmpeg-next"]  # Semantic Notes search (requires FFmpeg)

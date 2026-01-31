@@ -3303,8 +3303,6 @@ dependencies = [
 [[package]]
 name = "memvid-rs"
 version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43f25949f7825bf08fd75493286410455bd062cb95f570fe82c46c0f57b929f8"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -4252,6 +4250,7 @@ dependencies = [
  "clap",
  "dirs",
  "dotenvy",
+ "ffmpeg-next",
  "jsonwebtoken",
  "memvid-rs",
  "regex",

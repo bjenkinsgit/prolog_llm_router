@@ -17,6 +17,7 @@ mod agent;
 mod apple_maps;
 mod apple_notes;
 mod apple_weather;
+mod conversation_memory;
 mod derive_sketch;
 mod llm;
 mod memvid_notes;
@@ -82,6 +83,10 @@ struct Args {
     /// Maximum turns for agent mode before stopping
     #[arg(long = "max-turns", default_value = "10")]
     max_turns: u32,
+
+    /// Disable conversation memory for this query (agent mode only)
+    #[arg(long = "no-memory")]
+    no_memory: bool,
 
     /// Enable verbose debug output
     #[arg(long, short = 'v')]
@@ -1002,7 +1007,7 @@ fn main() -> Result<()> {
             if !text.is_empty() {
                 // Determine the arg name based on tool
                 let arg_name = match tool_name.as_str() {
-                    "search_notes" => "query",
+                    "search_notes" | "memory_search" => "query",
                     "notes_search_by_tag" => "tag",
                     "get_note" | "open_note" => "id",
                     "list_notes" => "folder",
@@ -1039,10 +1044,14 @@ fn main() -> Result<()> {
     if args.agent_mode {
         if args.verbose {
             eprintln!("DEBUG: Running in agent mode with max_turns={}", args.max_turns);
+            if args.no_memory {
+                eprintln!("DEBUG: Conversation memory disabled for this query");
+            }
         }
         let config = agent::AgentConfig {
             max_turns: args.max_turns,
             verbose: args.verbose,
+            use_memory: !args.no_memory,
         };
         let answer = agent::run_agent_loop(&args.user_text, &config, tool_executor.as_ref())?;
         println!("{}", answer);
