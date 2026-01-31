@@ -1,0 +1,32 @@
+[package]
+name = "prolog-router-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "prolog-router"
+path = "src/main.rs"
+
+[dependencies]
+prolog-router-core = { path = "../core" }
+
+# CLI argument parsing
+clap = { version = "4.0", features = ["derive"] }
+
+# Serde for JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+
+# Date/time handling (for tests)
+chrono = "0.4"
+
+# Load environment variables from .env file
+dotenvy = "0.15"
+
+[features]
+default = ["scryer-backend", "memvid"]
+scryer-backend = ["prolog-router-core/scryer-backend"]
+memvid = ["prolog-router-core/memvid"]

@@ -1,0 +1,32 @@
+[package]
+name = "prolog-router-app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "prolog_router_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "prolog-router-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+prolog-router-core = { path = "../core" }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1.0"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = ["custom-protocol", "scryer-backend", "memvid"]
+custom-protocol = ["tauri/custom-protocol"]
+scryer-backend = ["prolog-router-core/scryer-backend"]
+memvid = ["prolog-router-core/memvid"]

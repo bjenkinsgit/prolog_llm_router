@@ -1,0 +1,954 @@
+//! Agentic Chat Loop for LLM-driven tool orchestration
+//!
+//! Transforms the single-shot intent→tool→output flow into an agentic loop:
+//! user_query → [LOOP: LLM decides action → execute tool → feed result back] → final answer
+//!
+//! With conversation memory enabled (memvid feature), the agent:
+//! 1. Searches past conversations for relevant context
+//! 2. Injects retrieved context into the system prompt
+//! 3. Stores the user query and final answer for future retrieval
+
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::llm::{call_llm, LlmRequest};
+use crate::tools::ToolExecutor;
+use crate::conversation_memory::{
+    self, ConversationMemory,
+    load_memory_config, generate_session_id, format_memory_context,
+    load_or_create_sync, append_exchange_sync, search_sync,
+};
+
+// ============================================================================
+// Agent Configuration
+// ============================================================================
+
+/// Configuration for the agent loop
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    /// Maximum number of turns before stopping
+    pub max_turns: u32,
+    /// Whether to print verbose debug output
+    pub verbose: bool,
+    /// Whether to use conversation memory
+    pub use_memory: bool,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 10,
+            verbose: false,
+            use_memory: true,
+        }
+    }
+}
+
+// ============================================================================
+// Conversation State
+// ============================================================================
+
+/// Role of a message in the conversation
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    User,
+    Assistant,
+    Tool,
+}
+
+/// Result of a tool execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool: String,
+    pub success: bool,
+    pub output: String,
+}
+
+/// A single message in the conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: MessageRole,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<ToolResult>,
+}
+
+impl Message {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::User,
+            content: content.into(),
+            tool_result: None,
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            tool_result: None,
+        }
+    }
+
+    pub fn tool(tool_name: impl Into<String>, success: bool, output: impl Into<String>) -> Self {
+        let tool = tool_name.into();
+        let output = output.into();
+        Self {
+            role: MessageRole::Tool,
+            content: format!("Tool {} returned: {}", tool, output),
+            tool_result: Some(ToolResult {
+                tool,
+                success,
+                output,
+            }),
+        }
+    }
+}
+
+/// Tracks conversation state across turns
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ConversationState {
+    pub messages: Vec<Message>,
+    pub response_id: Option<String>,
+    pub turn_count: u32,
+    pub max_turns: u32,
+}
+
+impl ConversationState {
+    pub fn new(max_turns: u32) -> Self {
+        Self {
+            messages: Vec::new(),
+            response_id: None,
+            turn_count: 0,
+            max_turns,
+        }
+    }
+
+    pub fn add_user_message(&mut self, content: impl Into<String>) {
+        self.messages.push(Message::user(content));
+    }
+
+    pub fn add_assistant_message(&mut self, content: impl Into<String>) {
+        self.messages.push(Message::assistant(content));
+    }
+
+    pub fn add_tool_result(&mut self, tool: &str, success: bool, output: impl Into<String>) {
+        self.messages.push(Message::tool(tool, success, output));
+    }
+
+    /// Format conversation history for the LLM
+    pub fn format_for_llm(&self) -> String {
+        let mut parts = Vec::new();
+
+        for msg in &self.messages {
+            let prefix = match msg.role {
+                MessageRole::User => "USER",
+                MessageRole::Assistant => "ASSISTANT",
+                MessageRole::Tool => "TOOL_RESULT",
+            };
+            parts.push(format!("{}:\n{}", prefix, msg.content));
+        }
+
+        parts.join("\n\n")
+    }
+}
+
+// ============================================================================
+// Agent Events (for streaming to UI)
+// ============================================================================
+
+/// Events emitted during agent execution for UI updates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEvent {
+    /// A new turn has started
+    TurnStarted { turn: u32, max_turns: u32 },
+    /// Agent is calling a tool
+    ToolCalling { tool: String, args: Value },
+    /// Tool execution completed
+    ToolResult { tool: String, success: bool, output: String },
+    /// Agent has finished with a final answer
+    FinalAnswer { answer: String },
+    /// An error occurred
+    Error { message: String },
+}
+
+// ============================================================================
+// Agent Actions
+// ============================================================================
+
+/// Actions the agent can take
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum AgentAction {
+    /// Call a tool with arguments
+    CallTool { tool: String, args: Value },
+    /// Provide final answer to user
+    FinalAnswer { answer: String },
+    /// Ask user for more information
+    AskUser { question: String },
+}
+
+// ============================================================================
+// System Prompt
+// ============================================================================
+
+/// Default system prompt file path
+const AGENT_PROMPT_FILE: &str = "prompts/agent_system.md";
+
+/// Fallback prompt if file cannot be loaded
+const FALLBACK_AGENT_PROMPT: &str = r#"You are an intelligent assistant that helps users by calling tools.
+Today's date is {{TODAY}}.
+
+## Available Tools
+- get_apple_weather: Weather for location/date
+- search_notes: Search user's notes
+- search_files: Search user's files
+- draft_email: Draft an email
+- create_todo: Create a reminder
+
+## Response Format
+Respond with JSON only:
+
+1. Call a tool:
+   {"action": "call_tool", "tool": "get_apple_weather", "args": {"location": "Seattle", "date": "2026-01-27"}}
+
+2. Final answer:
+   {"action": "final_answer", "answer": "Based on the weather data..."}
+
+3. Need more info:
+   {"action": "ask_user", "question": "Which city?"}
+
+## Rules
+- After tool results, synthesize into a helpful answer
+- Be concise but informative
+"#;
+
+/// Load the agent system prompt with optional memory context
+fn load_agent_prompt(
+    tools: Option<&ToolExecutor>,
+    memory_context: Option<&str>,
+    verbose: bool
+) -> String {
+    use chrono::Local;
+    use std::fs;
+    use std::path::PathBuf;
+
+    let today = Local::now().format("%Y-%m-%d").to_string();
+
+    // Try multiple paths for the prompt file
+    let prompt_paths = [
+        PathBuf::from(AGENT_PROMPT_FILE),
+        PathBuf::from("../../prompts/agent_system.md"),
+        // For Tauri apps: use CARGO_MANIFEST_DIR to find workspace root
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../prompts/agent_system.md"),
+    ];
+
+    let prompt = prompt_paths
+        .iter()
+        .find(|p| p.exists())
+        .and_then(|p| {
+            if verbose {
+                eprintln!("DEBUG: Loading agent prompt from {:?}", p);
+            }
+            fs::read_to_string(p).ok()
+        })
+        .unwrap_or_else(|| {
+            if verbose {
+                eprintln!("DEBUG: Agent prompt file not found in paths: {:?}, using fallback", prompt_paths);
+            }
+            FALLBACK_AGENT_PROMPT.to_string()
+        });
+
+    // Replace {{TODAY}} placeholder
+    let mut prompt = prompt.replace("{{TODAY}}", &today);
+
+    // If tools executor provided, inject tool descriptions
+    if let Some(executor) = tools {
+        let tool_list: Vec<String> = executor
+            .all_tools()
+            .map(|t| format!("- {}: {}", t.name, t.description))
+            .collect();
+
+        if !tool_list.is_empty() {
+            let tools_section = format!("\n## Available Tools\n{}\n", tool_list.join("\n"));
+            // Try to replace existing tools section or append
+            if prompt.contains("## Available Tools") {
+                // Find the section and replace up to next ## or end
+                if let Some(start) = prompt.find("## Available Tools") {
+                    let after_header = &prompt[start + 18..];
+                    let end_offset = after_header
+                        .find("\n## ")
+                        .unwrap_or(after_header.len());
+                    let end = start + 18 + end_offset;
+                    prompt = format!("{}{}{}", &prompt[..start], tools_section, &prompt[end..]);
+                }
+            }
+        }
+    }
+
+    // Inject memory context if provided
+    if let Some(context) = memory_context {
+        if !context.is_empty() {
+            prompt.push_str(context);
+        }
+    }
+
+    prompt
+}
+
+// ============================================================================
+// Agent Loop
+// ============================================================================
+
+/// Parse agent action from LLM response
+/// Extracts the LAST valid JSON object (in case LLM "thinks out loud" with multiple JSONs)
+fn parse_agent_action(text: &str) -> Result<AgentAction> {
+    let s = text.trim();
+
+    // Fast path: try parsing the whole thing
+    if s.starts_with('{') && s.ends_with('}') {
+        if let Ok(action) = serde_json::from_str(s) {
+            return Ok(action);
+        }
+    }
+
+    // Find ALL JSON objects and return the last valid one
+    let mut last_valid: Option<AgentAction> = None;
+    let mut search_start = 0;
+
+    while let Some(start) = s[search_start..].find('{') {
+        let start = search_start + start;
+
+        // Brace balancing to find matching '}'
+        let mut in_str = false;
+        let mut escape = false;
+        let mut depth = 0;
+        let mut end = None;
+
+        for (i, ch) in s[start..].char_indices() {
+            if in_str {
+                if escape {
+                    escape = false;
+                } else if ch == '\\' {
+                    escape = true;
+                } else if ch == '"' {
+                    in_str = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_str = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(end_pos) = end {
+            let json_str = &s[start..end_pos];
+            if let Ok(action) = serde_json::from_str::<AgentAction>(json_str) {
+                last_valid = Some(action);
+            }
+            search_start = end_pos;
+        } else {
+            // No matching brace found, move past this '{'
+            search_start = start + 1;
+        }
+    }
+
+    last_valid.ok_or_else(|| {
+        let preview = if s.len() > 500 { &s[..500] } else { s };
+        anyhow!("No valid agent action JSON found in LLM output.\nOutput preview: {}", preview)
+    })
+}
+
+/// Call LLM and get agent action
+fn call_llm_for_action(
+    state: &ConversationState,
+    system_prompt: &str,
+    verbose: bool,
+) -> Result<AgentAction> {
+    let conversation = state.format_for_llm();
+    let input = format!("{}\n\n{}", system_prompt, conversation);
+
+    let request = LlmRequest {
+        input,
+        instructions: None,
+        // Don't use previous_response_id - not all endpoints support it
+        // and we're already passing the full conversation history
+        previous_response_id: None,
+        verbose,
+    };
+
+    let response = call_llm(&request)?;
+
+    if verbose {
+        eprintln!("DEBUG: LLM response: {}", response.output_text);
+    }
+
+    parse_agent_action(&response.output_text)
+}
+
+/// Execute a tool and return the result
+pub fn execute_tool(
+    tool: &str,
+    args: &Value,
+    executor: Option<&ToolExecutor>,
+) -> (bool, String) {
+    use crate::apple_notes;
+    use crate::apple_weather;
+
+    // Conversation memory tools
+    let memory_tools = ["memory_search", "memory_stats"];
+    if memory_tools.contains(&tool) {
+        return match tool {
+            "memory_search" => {
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+                match conversation_memory::search_json(query, top_k) {
+                    Ok(result) => (true, result),
+                    Err(e) => (false, format!("Memory search error: {}", e)),
+                }
+            }
+            "memory_stats" => {
+                match conversation_memory::stats_json() {
+                    Ok(result) => (true, result),
+                    Err(e) => (false, format!("Memory stats error: {}", e)),
+                }
+            }
+            _ => unreachable!(),
+        };
+    }
+
+    // Apple Notes tools
+    let notes_tools = [
+        "search_notes",
+        "list_notes",
+        "get_note",
+        "open_note",
+        "notes_index",
+        "notes_tags",
+        "notes_search_by_tag",
+        // Memvid-powered semantic search
+        "notes_semantic_search",
+        "notes_rebuild_index",
+        "notes_index_stats",
+        "notes_smart_search",
+    ];
+    if notes_tools.contains(&tool) {
+        if apple_notes::is_available() {
+            let action = match tool {
+                // Redirect search_notes to smart_search (uses semantic if index exists)
+                "search_notes" => "smart_search",
+                "list_notes" => "list",
+                "get_note" => "get",
+                "open_note" => "open",
+                "notes_index" => {
+                    // Check 'action' arg: "build" or "check" (default: check)
+                    match args.get("action").and_then(|v| v.as_str()).unwrap_or("check") {
+                        "build" => "index_build",
+                        _ => "index_check",
+                    }
+                }
+                "notes_tags" => "tags",
+                "notes_search_by_tag" => "search_by_tag",
+                // Memvid-powered semantic search
+                "notes_semantic_search" => "semantic_search",
+                "notes_rebuild_index" => "rebuild_memvid_index",
+                "notes_index_stats" => "memvid_stats",
+                "notes_smart_search" => "smart_search",
+                _ => unreachable!(),
+            };
+            match apple_notes::execute_apple_notes(action, args) {
+                Ok(result) => return (true, result),
+                Err(e) => {
+                    return (false, format!("Apple Notes error: {}", e));
+                }
+            }
+        }
+        // Fall through to executor or stub if Apple Notes not available
+    }
+
+    // Special handling for Apple WeatherKit
+    if tool == "get_apple_weather" {
+        if apple_weather::is_configured() {
+            let location = args["location"].as_str().unwrap_or("NYC");
+            let date = args.get("date").and_then(|v| v.as_str());
+            let date_end = args.get("date_end").and_then(|v| v.as_str());
+            let query_type = args
+                .get("weather_query")
+                .and_then(|v| v.as_str())
+                .map(apple_weather::QueryType::from_str)
+                .unwrap_or_default();
+
+            match apple_weather::execute_apple_weather(location, date, date_end, query_type) {
+                Ok(result) => return (true, result),
+                Err(e) => {
+                    eprintln!("WARNING: Apple Weather failed: {}", e);
+                    return (false, format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Try to execute via configured endpoint
+    if let Some(exec) = executor {
+        if exec.has_endpoint(tool) {
+            match exec.execute(tool, args) {
+                Ok(Some(result)) => return (true, result),
+                Ok(None) => {
+                    // No endpoint configured, fall through to stub
+                }
+                Err(e) => {
+                    eprintln!("WARNING: Tool execution failed: {}", e);
+                    return (false, format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Fall back to stub
+    let result = match tool {
+        "search_notes" => format!("[stub] searched notes for: {}", args),
+        "search_files" => format!("[stub] searched files for: {}", args),
+        "get_weather" => format!("[stub] weather result for: {}", args),
+        "get_apple_weather" => format!("[stub] apple weather result for: {}", args),
+        "draft_email" => format!("[stub] drafted email with: {}", args),
+        "create_todo" => format!("[stub] created todo with: {}", args),
+        _ => format!("[stub] unknown tool: {} args={}", tool, args),
+    };
+
+    (true, result)
+}
+
+/// Run the main agent loop
+///
+/// Transforms user query into a series of LLM → tool → LLM interactions
+/// until the agent provides a final answer or reaches max turns.
+///
+/// With conversation memory enabled:
+/// 1. Searches past conversations for relevant context
+/// 2. Injects retrieved context into the system prompt
+/// 3. Stores the user query and final answer for future retrieval
+pub fn run_agent_loop(
+    query: &str,
+    config: &AgentConfig,
+    executor: Option<&ToolExecutor>,
+) -> Result<String> {
+    let mut state = ConversationState::new(config.max_turns);
+    state.add_user_message(query);
+
+    // Load memory config and optionally search for relevant context
+    let memory_config = load_memory_config();
+    let use_memory = config.use_memory && memory_config.enabled;
+
+    let (memory_context, memory, session_id) = if use_memory {
+        if config.verbose {
+            eprintln!("DEBUG: Loading conversation memory...");
+        }
+
+        match load_or_create_sync() {
+            Ok(mut mem) => {
+                // Search for relevant past conversations
+                let context = if ConversationMemory::exists() {
+                    match search_sync(&mut mem, query, memory_config.max_context_results) {
+                        Ok(results) => {
+                            if config.verbose {
+                                eprintln!("DEBUG: Found {} relevant past conversations", results.len());
+                            }
+                            format_memory_context(&results)
+                        }
+                        Err(e) => {
+                            if config.verbose {
+                                eprintln!("DEBUG: Memory search failed: {}", e);
+                            }
+                            String::new()
+                        }
+                    }
+                } else {
+                    if config.verbose {
+                        eprintln!("DEBUG: No conversation memory exists yet");
+                    }
+                    String::new()
+                };
+
+                let session_id = generate_session_id();
+                if config.verbose {
+                    eprintln!("DEBUG: Session ID: {}", session_id);
+                }
+
+                (Some(context), Some(mem), Some(session_id))
+            }
+            Err(e) => {
+                eprintln!("WARNING: Failed to load conversation memory: {}", e);
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let system_prompt = load_agent_prompt(
+        executor,
+        memory_context.as_deref(),
+        config.verbose
+    );
+
+    if config.verbose {
+        eprintln!("DEBUG: Starting agent loop with max_turns={}", config.max_turns);
+    }
+
+    let final_answer = loop {
+        if state.turn_count >= state.max_turns {
+            break format!(
+                "Max turns ({}) reached. Last context: {}",
+                state.max_turns,
+                state.messages.last().map(|m| &m.content[..]).unwrap_or("")
+            );
+        }
+
+        let action = call_llm_for_action(&state, &system_prompt, config.verbose)?;
+        state.turn_count += 1;
+
+        if config.verbose {
+            eprintln!("DEBUG: Turn {}: {:?}", state.turn_count, action);
+        }
+
+        match action {
+            AgentAction::FinalAnswer { answer } => {
+                break answer;
+            }
+
+            AgentAction::AskUser { question } => {
+                break format!("Need more information: {}", question);
+            }
+
+            AgentAction::CallTool { tool, args } => {
+                if config.verbose {
+                    eprintln!("DEBUG: Calling tool '{}' with args: {}", tool, args);
+                }
+
+                let (success, output) = execute_tool(&tool, &args, executor);
+
+                if config.verbose {
+                    eprintln!(
+                        "DEBUG: Tool result (success={}): {}",
+                        success,
+                        if output.len() > 200 {
+                            format!("{}...", &output[..200])
+                        } else {
+                            output.clone()
+                        }
+                    );
+                }
+
+                // Add tool result to conversation and continue loop
+                state.add_tool_result(&tool, success, output);
+                // Record assistant's tool call decision
+                state.add_assistant_message(format!(
+                    "Called tool {} with args: {}",
+                    tool,
+                    serde_json::to_string(&args).unwrap_or_default()
+                ));
+            }
+        }
+    };
+
+    // Store the exchange in memory
+    if let (Some(ref mut mem), Some(ref sid)) = (memory, session_id) {
+        if config.verbose {
+            eprintln!("DEBUG: Storing conversation in memory...");
+        }
+
+        if let Err(e) = append_exchange_sync(mem, sid, query, &final_answer) {
+            eprintln!("WARNING: Failed to store conversation in memory: {}", e);
+        } else if config.verbose {
+            eprintln!("DEBUG: Conversation stored successfully");
+        }
+    }
+
+    Ok(final_answer)
+}
+
+/// Run the agent loop with event callbacks for UI streaming
+///
+/// This is the same as `run_agent_loop` but emits events during execution
+/// that can be used to update a UI in real-time.
+pub fn run_agent_loop_with_events<F>(
+    query: &str,
+    config: &AgentConfig,
+    executor: Option<&ToolExecutor>,
+    on_event: F,
+) -> Result<String>
+where
+    F: Fn(AgentEvent),
+{
+    let mut state = ConversationState::new(config.max_turns);
+    state.add_user_message(query);
+
+    // Load memory config and optionally search for relevant context
+    let memory_config = load_memory_config();
+    let use_memory = config.use_memory && memory_config.enabled;
+
+    let (memory_context, memory, session_id) = if use_memory {
+        if config.verbose {
+            eprintln!("DEBUG: Loading conversation memory...");
+        }
+
+        match load_or_create_sync() {
+            Ok(mut mem) => {
+                let context = if ConversationMemory::exists() {
+                    match search_sync(&mut mem, query, memory_config.max_context_results) {
+                        Ok(results) => {
+                            if config.verbose {
+                                eprintln!("DEBUG: Found {} relevant past conversations", results.len());
+                            }
+                            format_memory_context(&results)
+                        }
+                        Err(e) => {
+                            if config.verbose {
+                                eprintln!("DEBUG: Memory search failed: {}", e);
+                            }
+                            String::new()
+                        }
+                    }
+                } else {
+                    if config.verbose {
+                        eprintln!("DEBUG: No conversation memory exists yet");
+                    }
+                    String::new()
+                };
+
+                let session_id = generate_session_id();
+                if config.verbose {
+                    eprintln!("DEBUG: Session ID: {}", session_id);
+                }
+
+                (Some(context), Some(mem), Some(session_id))
+            }
+            Err(e) => {
+                eprintln!("WARNING: Failed to load conversation memory: {}", e);
+                on_event(AgentEvent::Error {
+                    message: format!("Failed to load memory: {}", e),
+                });
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let system_prompt = load_agent_prompt(
+        executor,
+        memory_context.as_deref(),
+        config.verbose
+    );
+
+    if config.verbose {
+        eprintln!("DEBUG: Starting agent loop with max_turns={}", config.max_turns);
+    }
+
+    let final_answer = loop {
+        if state.turn_count >= state.max_turns {
+            let answer = format!(
+                "Max turns ({}) reached. Last context: {}",
+                state.max_turns,
+                state.messages.last().map(|m| &m.content[..]).unwrap_or("")
+            );
+            on_event(AgentEvent::FinalAnswer { answer: answer.clone() });
+            break answer;
+        }
+
+        // Emit turn started event
+        on_event(AgentEvent::TurnStarted {
+            turn: state.turn_count + 1,
+            max_turns: state.max_turns,
+        });
+
+        let action = match call_llm_for_action(&state, &system_prompt, config.verbose) {
+            Ok(a) => a,
+            Err(e) => {
+                on_event(AgentEvent::Error {
+                    message: format!("LLM error: {}", e),
+                });
+                return Err(e);
+            }
+        };
+        state.turn_count += 1;
+
+        if config.verbose {
+            eprintln!("DEBUG: Turn {}: {:?}", state.turn_count, action);
+        }
+
+        match action {
+            AgentAction::FinalAnswer { answer } => {
+                on_event(AgentEvent::FinalAnswer { answer: answer.clone() });
+                break answer;
+            }
+
+            AgentAction::AskUser { question } => {
+                let answer = format!("Need more information: {}", question);
+                on_event(AgentEvent::FinalAnswer { answer: answer.clone() });
+                break answer;
+            }
+
+            AgentAction::CallTool { tool, args } => {
+                // Emit tool calling event
+                on_event(AgentEvent::ToolCalling {
+                    tool: tool.clone(),
+                    args: args.clone(),
+                });
+
+                if config.verbose {
+                    eprintln!("DEBUG: Calling tool '{}' with args: {}", tool, args);
+                }
+
+                let (success, output) = execute_tool(&tool, &args, executor);
+
+                // Emit tool result event
+                on_event(AgentEvent::ToolResult {
+                    tool: tool.clone(),
+                    success,
+                    output: output.clone(),
+                });
+
+                if config.verbose {
+                    eprintln!(
+                        "DEBUG: Tool result (success={}): {}",
+                        success,
+                        if output.len() > 200 {
+                            format!("{}...", &output[..200])
+                        } else {
+                            output.clone()
+                        }
+                    );
+                }
+
+                // Add tool result to conversation and continue loop
+                state.add_tool_result(&tool, success, output);
+                state.add_assistant_message(format!(
+                    "Called tool {} with args: {}",
+                    tool,
+                    serde_json::to_string(&args).unwrap_or_default()
+                ));
+            }
+        }
+    };
+
+    // Store the exchange in memory
+    if let (Some(ref mut mem), Some(ref sid)) = (memory, session_id) {
+        if config.verbose {
+            eprintln!("DEBUG: Storing conversation in memory...");
+        }
+
+        if let Err(e) = append_exchange_sync(mem, sid, query, &final_answer) {
+            eprintln!("WARNING: Failed to store conversation in memory: {}", e);
+        } else if config.verbose {
+            eprintln!("DEBUG: Conversation stored successfully");
+        }
+    }
+
+    Ok(final_answer)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_agent_action_call_tool() {
+        let json = r#"{"action": "call_tool", "tool": "get_weather", "args": {"location": "NYC"}}"#;
+        let action = parse_agent_action(json).unwrap();
+        match action {
+            AgentAction::CallTool { tool, args } => {
+                assert_eq!(tool, "get_weather");
+                assert_eq!(args["location"], "NYC");
+            }
+            _ => panic!("Expected CallTool action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_action_final_answer() {
+        let json = r#"{"action": "final_answer", "answer": "The weather is sunny."}"#;
+        let action = parse_agent_action(json).unwrap();
+        match action {
+            AgentAction::FinalAnswer { answer } => {
+                assert_eq!(answer, "The weather is sunny.");
+            }
+            _ => panic!("Expected FinalAnswer action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_action_ask_user() {
+        let json = r#"{"action": "ask_user", "question": "Which city?"}"#;
+        let action = parse_agent_action(json).unwrap();
+        match action {
+            AgentAction::AskUser { question } => {
+                assert_eq!(question, "Which city?");
+            }
+            _ => panic!("Expected AskUser action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_action_with_surrounding_text() {
+        let text = r#"Let me check the weather.
+        {"action": "call_tool", "tool": "get_weather", "args": {"location": "Seattle"}}
+        "#;
+        let action = parse_agent_action(text).unwrap();
+        match action {
+            AgentAction::CallTool { tool, .. } => {
+                assert_eq!(tool, "get_weather");
+            }
+            _ => panic!("Expected CallTool action"),
+        }
+    }
+
+    #[test]
+    fn test_conversation_state_format() {
+        let mut state = ConversationState::new(10);
+        state.add_user_message("What's the weather in NYC?");
+        state.add_tool_result("get_weather", true, "Sunny, 72F");
+        state.add_assistant_message("The weather in NYC is sunny with 72F.");
+
+        let formatted = state.format_for_llm();
+        assert!(formatted.contains("USER:"));
+        assert!(formatted.contains("TOOL_RESULT:"));
+        assert!(formatted.contains("ASSISTANT:"));
+        assert!(formatted.contains("What's the weather in NYC?"));
+        assert!(formatted.contains("Sunny, 72F"));
+    }
+
+    #[test]
+    fn test_message_constructors() {
+        let user = Message::user("Hello");
+        assert_eq!(user.role, MessageRole::User);
+        assert_eq!(user.content, "Hello");
+        assert!(user.tool_result.is_none());
+
+        let tool = Message::tool("weather", true, "Sunny");
+        assert_eq!(tool.role, MessageRole::Tool);
+        assert!(tool.tool_result.is_some());
+        let tr = tool.tool_result.unwrap();
+        assert_eq!(tr.tool, "weather");
+        assert!(tr.success);
+        assert_eq!(tr.output, "Sunny");
+    }
+}

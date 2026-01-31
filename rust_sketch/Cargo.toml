@@ -1,3 +1,13 @@
+[workspace]
+members = ["crates/core", "crates/cli", "crates/tauri-app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Legacy package definition for backwards compatibility during migration
+# This will be removed once migration is complete
 [package]
 name = "prolog-router"
 version = "0.1.0"

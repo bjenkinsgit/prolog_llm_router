@@ -1,0 +1,57 @@
+[package]
+name = "prolog-router-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Scryer Prolog - pure Rust, no external dependencies
+scryer-prolog = { version = "0.10", optional = true }
+
+# Serde for JSON serialization (LLM structured output)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client for LLM API and tool execution
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+
+# Regex for template substitution
+regex = "1.10"
+
+# Error handling
+anyhow = "1.0"
+
+# Date/time handling
+chrono = "0.4"
+
+# JWT for Apple WeatherKit authentication
+jsonwebtoken = "9.3"
+base64 = "0.22"
+
+# Load environment variables from .env file
+dotenvy = "0.15"
+
+# URL encoding for API queries
+urlencoding = "2.1"
+
+# Platform-specific directories (cache, config, etc.)
+dirs = "5.0"
+
+# TOML config parsing
+toml = "0.8"
+
+# SQLite for reading Apple Notes database directly
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Memvid - semantic search with QR-encoded video storage
+memvid-rs = { path = "/Users/bwj/src/ai/memvid-rs", optional = true }
+
+# FFmpeg bindings for log level control (suppress swscaler warnings)
+ffmpeg-next = { version = "7.1", optional = true }
+
+# Async runtime for memvid operations
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = ["scryer-backend", "memvid"]
+scryer-backend = ["scryer-prolog"]
+memvid = ["memvid-rs", "ffmpeg-next"]

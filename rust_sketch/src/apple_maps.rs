@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Apple Maps configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AppleMapsConfig {
     /// Apple Developer Team ID
     pub team_id: String,
@@ -128,6 +129,7 @@ pub struct GeocodeResponse {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct GeocodeResult {
     pub coordinate: Coordinate,
     pub display_map_region: Option<MapRegion>,
@@ -258,6 +260,7 @@ impl AppleMapsClient {
     }
 
     /// Geocode and return full result with address info
+    #[allow(dead_code)]
     pub fn geocode_full(&self, query: &str) -> Result<GeocodeResult> {
         let access_token = self.get_access_token()?;
 

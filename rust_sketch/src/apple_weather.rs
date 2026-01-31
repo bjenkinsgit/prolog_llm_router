@@ -96,6 +96,7 @@ impl WeatherKitConfig {
     }
 
     /// Create config with explicit values
+    #[allow(dead_code)]
     pub fn new(team_id: &str, service_id: &str, key_id: &str, private_key_path: &str) -> Self {
         Self {
             team_id: team_id.to_string(),
@@ -213,6 +214,7 @@ impl WeatherKitClient {
     }
 
     /// Create client from environment variables
+    #[allow(dead_code)]
     pub fn from_env() -> Result<Self> {
         Self::new(WeatherKitConfig::from_env()?)
     }
@@ -250,6 +252,7 @@ impl WeatherKitClient {
 
     /// Get weather by city name (uses geocoding first)
     /// For simplicity, this uses a basic lookup - in production you'd use Apple Maps or similar
+    #[allow(dead_code)]
     pub fn get_weather_by_city(&self, city: &str) -> Result<String> {
         // Simple geocoding lookup for common cities
         // In production, use Apple Maps Geocoding API
@@ -422,6 +425,7 @@ const BAD_CONDITIONS: &[&str] = &[
 
 /// Assessment of a day's weather
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DayAssessment {
     pub date: String,
     pub is_bad: bool,
